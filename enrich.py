@@ -332,6 +332,23 @@ class HunterClient:
                 "emails": [e.get("value") for e in emails if e.get("value")]}
 
 
+def domain_has_mx(domain: str) -> bool:
+    """Free DNS check: does this domain have mail servers? Used to avoid
+    building emails on a wrong/guessed domain. Fail-open: if the DNS check
+    itself errors, returns True so a network hiccup doesn't block results."""
+    domain = (domain or "").strip().lower()
+    if not domain or "." not in domain:
+        return False
+    try:
+        resp = requests.get(
+            "https://dns.google/resolve",
+            params={"name": domain, "type": "MX"},
+            timeout=8, headers={"Accept": "application/json"})
+        return bool(resp.json().get("Answer"))
+    except Exception:
+        return True
+
+
 def _email_matches_name(email: str, first_name: str, last_name: str) -> bool:
     """Does this email's local part look like it belongs to this person?
     Used to spot the candidate's own address in a directory listing."""
@@ -853,9 +870,17 @@ def enrich_candidate(
                         f"Other name-matching emails on site: {', '.join(website_hits[1:3])}"
                     )
             else:
+                # Pattern-building needs a real mail domain. If the domain
+                # (often derived from the company name) has no mail servers,
+                # anything built on it would be invalid — skip and say so.
+                mx_ok = domain_has_mx(fbdomain)
+                if not mx_ok:
+                    result["notes"].append(
+                        f"Skipped email construction: '{fbdomain}' has no "
+                        f"mail servers (domain may be wrong).")
                 directory_email = ""
                 directory_found = False
-                if hunter_key:
+                if hunter_key and mx_ok:
                     # Directory step: Hunter's domain directory lists real
                     # emails at the company. If the candidate's own email is
                     # in there, that's a FOUND email (green). Otherwise learn
@@ -889,7 +914,7 @@ def enrich_candidate(
                         if directory_found else
                         "built from company email pattern (UNVERIFIED — "
                         "verify before use)")
-                else:
+                elif mx_ok:
                     guesses = guess_work_emails(first, last, fbdomain)
                     if guesses:
                         result["work_email"] = guesses[0]
@@ -902,6 +927,28 @@ def enrich_candidate(
                             )
                     else:
                         result["notes"].append("Work email not found; could not build a pattern.")
+
+    # --- 4b) Verify any UNVERIFIED work email with Hunter before it ships.
+    # If Hunter's verifier says "invalid", drop it — a wrong email is worse
+    # than a blank cell. Costs 1 verification credit per email.
+    if result["work_email"] and hunter_key and \
+            "UNVERIFIED" in (result.get("work_email_source") or ""):
+        try:
+            v = HunterClient(hunter_key).email_verifier(result["work_email"])
+            time.sleep(polite_delay)
+            vstatus = str(v.get("status", "")).lower()
+            if vstatus == "invalid":
+                result["notes"].append(
+                    f"Dropped {result['work_email']}: Hunter verifier reports "
+                    f"it as invalid.")
+                result["work_email"] = ""
+                result["work_email_source"] = ""
+            elif vstatus == "valid":
+                result["work_email_source"] += " [Hunter verifier: valid]"
+        except (EnrichmentAuthError, EnrichmentCreditError):
+            raise
+        except Exception as exc:
+            result["notes"].append(f"Email verification failed: {exc}")
 
     result["notes"] = "; ".join(result["notes"])
     return result

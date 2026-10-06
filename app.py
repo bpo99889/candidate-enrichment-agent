@@ -174,17 +174,23 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     columns (in place). Only fills blank cells — existing data is never
     overwritten. Adds a missing contact column at the end if needed.
 
-    Work-email highlighting (user's rule):
-    - Work emails from any tool (Hunter, SalesQL, ContactOut, Lusha) stay
-      unhighlighted.
-    - Work emails from company websites, directories, or built/guessed by
-      the agent (all UNVERIFIED) get a PINK highlight.
+    Work-email routing + highlighting (user's rules):
+    - Work emails from any tool (Hunter, SalesQL, ContactOut, Lusha) go to
+      the "Work Email" column, unhighlighted.
+    - UNVERIFIED work emails (website, directory, constructed) go to a
+      separate "Possible Work Email" column (created if missing) with a
+      PINK highlight.
     Returns xlsx bytes."""
     import io
     from openpyxl import load_workbook
     from openpyxl.styles import PatternFill
 
     PINK_FILL = PatternFill("solid", fgColor="FFC7CE")
+
+    def _is_tool_email(source: str) -> bool:
+        s = (source or "").lower()
+        return any(t in s for t in ("hunter.io", "salesql", "contactout",
+                                    "lusha"))
 
     bio = io.BytesIO(file_bytes)
     if filename.lower().endswith(".csv"):
@@ -207,6 +213,14 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
         "work_phone": (["work phone", "work direct phone", "direct phone",
                         "office phone"], "Work Phone"),
     }
+    # Separate column for unverified work emails — added only when needed.
+    need_possible = any(
+        (r.get("work_email") or "") and
+        not _is_tool_email(r.get("work_email_source"))
+        for _c, r in enriched_rows
+    )
+    if need_possible:
+        targets["possible_work_email"] = ([], "Possible Work Email")
     colmap = {}
     for field, (aliases, new_name) in targets.items():
         idx = next((norm[a] for a in aliases if a in norm), None)
@@ -221,23 +235,16 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
         v = cell.value
         return v is None or str(v).strip() in ("", "nan", "None")
 
-    def _work_email_fill(source: str):
-        s = (source or "").lower()
-        # Tool-verified emails stay plain; anything from a website,
-        # directory, or constructed by the agent is UNVERIFIED -> pink.
-        # Note: "hunter.io" (finder) is a tool, but "hunter directory"
-        # is a directory -> pink.
-        if any(t in s for t in ("hunter.io", "salesql", "contactout",
-                                "lusha")):
-            return None
-        return PINK_FILL
-
     for i, (_cand, res) in enumerate(enriched_rows):
         r = i + 2  # 1-indexed + header row
         if r > ws.max_row:
             break
+        we = res.get("work_email") or ""
+        we_tool = _is_tool_email(res.get("work_email_source"))
         vals = {
-            "work_email": res.get("work_email") or "",
+            # Verified tool email -> Work Email; unverified -> Possible column
+            "work_email": we if we_tool else "",
+            "possible_work_email": we if (we and not we_tool) else "",
             "personal_email": res.get("personal_email") or "",
             "personal_phone": res.get("personal_phone") or "",
             "work_phone": res.get("work_phone") or "",
@@ -248,10 +255,8 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
             cell = ws.cell(row=r, column=cidx + 1)
             if _blank(cell):
                 cell.value = vals[field]
-                if field == "work_email":
-                    fill = _work_email_fill(res.get("work_email_source"))
-                    if fill is not None:
-                        cell.fill = fill
+                if field == "possible_work_email":
+                    cell.fill = PINK_FILL
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
