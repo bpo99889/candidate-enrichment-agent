@@ -332,6 +332,18 @@ class HunterClient:
                 "emails": [e.get("value") for e in emails if e.get("value")]}
 
 
+def _email_matches_name(email: str, first_name: str, last_name: str) -> bool:
+    """Does this email's local part look like it belongs to this person?
+    Used to spot the candidate's own address in a directory listing."""
+    local = (email or "").split("@")[0].lower()
+    first = re.sub(r"[^a-z]", "", (first_name or "").lower())
+    last = re.sub(r"[^a-z]", "", (last_name or "").lower())
+    if not (local and first and last):
+        return False
+    return (first in local and last in local) or \
+           (first[:1] + last in local) or (first + last[:1] in local)
+
+
 def build_from_pattern(first_name: str, last_name: str,
                        pattern: str, domain: str) -> str:
     """Build an email from Hunter's directory pattern, e.g. '{first}.{last}'
@@ -837,17 +849,26 @@ def enrich_candidate(
                     )
             else:
                 directory_email = ""
+                directory_found = False
                 if hunter_key:
-                    # Directory step: learn the company's real email pattern,
-                    # then build this candidate's address from it (1 search).
+                    # Directory step: Hunter's domain directory lists real
+                    # emails at the company. If the candidate's own email is
+                    # in there, that's a FOUND email (green). Otherwise learn
+                    # the company's pattern and build it (pink).
                     try:
                         hclient = HunterClient(hunter_key)
                         ds = hclient.domain_search(domain)
                         time.sleep(polite_delay)
-                        if ds and ds.get("pattern"):
-                            directory_email = build_from_pattern(
-                                first, last, ds["pattern"], domain)
-                            if directory_email:
+                        if ds:
+                            for e in ds.get("emails") or []:
+                                if _email_matches_name(e, first, last):
+                                    directory_email = e
+                                    directory_found = True
+                                    break
+                            if not directory_email and ds.get("pattern"):
+                                directory_email = build_from_pattern(
+                                    first, last, ds["pattern"], domain)
+                            if ds.get("pattern"):
                                 result["notes"].append(
                                     f"Hunter directory shows this company uses "
                                     f"pattern '{ds['pattern']}'.")
@@ -859,6 +880,8 @@ def enrich_candidate(
                 if directory_email:
                     result["work_email"] = directory_email
                     result["work_email_source"] = (
+                        "Hunter directory (UNVERIFIED — confirm before use)"
+                        if directory_found else
                         "built from company email pattern (UNVERIFIED — "
                         "verify before use)")
                 else:

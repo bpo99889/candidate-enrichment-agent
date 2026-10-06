@@ -173,14 +173,31 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     """Write enriched contact details back into the uploaded sheet's own
     columns (in place). Only fills blank cells — existing data is never
     overwritten. Adds a missing contact column at the end if needed.
+
+    Work-email highlighting (user's rule):
+    - GREEN: email FOUND on the company website or in the email directory
+    - PINK: email CONSTRUCTED by the agent (pattern-built/guessed)
     Returns xlsx bytes."""
     import io
+    from openpyxl import load_workbook
+    from openpyxl.styles import PatternFill
+
+    GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
+    PINK_FILL = PatternFill("solid", fgColor="FFC7CE")
+
     bio = io.BytesIO(file_bytes)
     if filename.lower().endswith(".csv"):
         df = pd.read_csv(bio)
-    else:
-        df = pd.read_excel(bio)
-    norm = {str(c).strip().lower(): c for c in df.columns}
+        tmp = io.BytesIO()
+        df.to_excel(tmp, index=False)
+        tmp.seek(0)
+        bio = tmp
+    wb = load_workbook(bio)
+    ws = wb.active
+
+    headers = [(c.value if c.value is not None else "") for c in ws[1]]
+    norm = {str(h).strip().lower(): i for i, h in enumerate(headers)
+            if str(h).strip()}
     targets = {
         "work_email": (["work email"], "Work Email"),
         "personal_email": (["personal email"], "Personal Email"),
@@ -191,14 +208,29 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     }
     colmap = {}
     for field, (aliases, new_name) in targets.items():
-        found = next((norm[a] for a in aliases if a in norm), None)
-        if found is None:
-            df[new_name] = ""
-            found = new_name
-        colmap[field] = found
-        df[found] = df[found].astype(object).where(df[found].notna(), "")
+        idx = next((norm[a] for a in aliases if a in norm), None)
+        if idx is None:
+            idx = len(headers)
+            ws.cell(row=1, column=idx + 1, value=new_name)
+            headers.append(new_name)
+            norm[new_name.strip().lower()] = idx
+        colmap[field] = idx
+
+    def _blank(cell):
+        v = cell.value
+        return v is None or str(v).strip() in ("", "nan", "None")
+
+    def _work_email_fill(source: str):
+        s = (source or "").lower()
+        if "company website" in s or "hunter directory (unverified" in s:
+            return GREEN_FILL
+        if "built from company email pattern" in s or "pattern-guessed" in s:
+            return PINK_FILL
+        return None
+
     for i, (_cand, res) in enumerate(enriched_rows):
-        if i >= len(df):
+        r = i + 2  # 1-indexed + header row
+        if r > ws.max_row:
             break
         vals = {
             "work_email": res.get("work_email") or "",
@@ -206,14 +238,18 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
             "personal_phone": res.get("personal_phone") or "",
             "work_phone": res.get("work_phone") or "",
         }
-        for field, col in colmap.items():
-            if vals[field]:
-                cur = df.at[i, col]
-                if cur == "" or (isinstance(cur, float) and pd.isna(cur)) \
-                        or str(cur).strip() in ("", "nan", "None"):
-                    df.at[i, col] = vals[field]
+        for field, cidx in colmap.items():
+            if not vals[field]:
+                continue
+            cell = ws.cell(row=r, column=cidx + 1)
+            if _blank(cell):
+                cell.value = vals[field]
+                if field == "work_email":
+                    fill = _work_email_fill(res.get("work_email_source"))
+                    if fill is not None:
+                        cell.fill = fill
     out = io.BytesIO()
-    df.to_excel(out, index=False)
+    wb.save(out)
     return out.getvalue()
 
 
