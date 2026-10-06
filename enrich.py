@@ -614,19 +614,28 @@ def enrich_candidate(
                 result["personal_email"] = e["email"]
                 result["personal_email_source"] = f"{src} (verified by tool)"
         if not result["work_phone"] and not result["personal_phone"] and hit.get("phones"):
-            # Phone routing per source:
-            # - SalesQL: EVERY number (including "direct") is personal. The
-            #   user takes work email + personal email + phone from SalesQL,
-            #   never a work phone.
-            # - Others (ContactOut etc.): mobile/cell/unlabeled -> personal,
-            #   work/direct/office -> work. Multiple numbers are joined.
+            # Phone routing per source (user's rules):
+            # - SalesQL: ONLY "direct" numbers are taken, all go to the
+            #   personal number. No work phone ever comes from SalesQL.
+            # - ContactOut: ALL given numbers go to the personal (mobile)
+            #   number, regardless of label.
+            # - Others: mobile/cell/unlabeled -> personal, work/direct/
+            #   office -> work. Multiple numbers are joined.
             mobiles, works = [], []
-            salesql = "salesql" in src.lower()
+            slow = src.lower()
+            salesql = "salesql" in slow
+            contactout = "contactout" in slow
             for p in hit["phones"]:
                 ptype = (p.get("type") or "").lower()
                 num = p["phone"]
-                if not salesql and any(t in ptype for t in
-                                       ("work", "direct", "office", "business")):
+                if salesql:
+                    if "direct" in ptype and num not in mobiles:
+                        mobiles.append(num)
+                elif contactout:
+                    if num not in mobiles:
+                        mobiles.append(num)
+                elif any(t in ptype for t in
+                         ("work", "direct", "office", "business")):
                     if num not in works:
                         works.append(num)
                 elif num not in mobiles:
