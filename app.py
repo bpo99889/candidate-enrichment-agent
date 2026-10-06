@@ -243,7 +243,7 @@ with tab_api:
     st.info("**API key mode (recommended for real use)** — paste YOUR OWN keys. "
             "Keys stay in this browser session only; lookups spend credits "
             "from your accounts.")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
         salesql_key = st.text_input(
             "SalesQL API key", type="password", key="api_sql",
@@ -254,12 +254,18 @@ with tab_api:
             "ContactOut API token", type="password", key="api_co",
             help="ContactOut dashboard → API. Needs a paid plan.",
         ) or None
+    c3, c4 = st.columns(2)
     with c3:
         hunter_key = st.text_input(
             "Hunter.io API key", type="password", key="api_hunter",
             help="hunter.io → Dashboard → API. Free plan: 25 searches + 50 verifications/month, no card. Finds WORK emails only.",
         ) or None
-    t1, t2 = st.columns(2)
+    with c4:
+        lusha_key = st.text_input(
+            "Lusha API key", type="password", key="api_lusha",
+            help="dashboard.lusha.com → API & Integrations. Free plan: ~40 credits/month, no card. Finds work emails AND phone numbers (phones cost ~5-10 credits each).",
+        ) or None
+    t1, t2, t3 = st.columns(3)
     with t1:
         if st.button("Test ContactOut key (free, no credits spent)", key="api_test"):
             if not contactout_key:
@@ -291,19 +297,37 @@ with tab_api:
                     st.error(str(e))
                 except Exception as e:
                     st.error(f"Key check failed: {e}")
+    with t3:
+        if st.button("Test Lusha key (free)", key="api_test_lusha"):
+            if not lusha_key:
+                st.error("Paste your Lusha API key first.")
+            else:
+                try:
+                    from enrich import LushaClient
+                    usage = LushaClient(lusha_key).usage()
+                    st.success(f"Key works. Usage info: {usage}")
+                except EnrichmentAuthError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Key check failed: {e}")
 
     api_candidates = upload_block("api")
-    can_run = bool(api_candidates) and (salesql_key or contactout_key or hunter_key)
-    if api_candidates and not (salesql_key or contactout_key or hunter_key):
+    can_run = bool(api_candidates) and (salesql_key or contactout_key or hunter_key
+                                        or lusha_key)
+    if api_candidates and not (salesql_key or contactout_key or hunter_key or lusha_key):
         st.warning("Paste at least one API key above to run.")
     if hunter_key and api_candidates:
         st.caption(f"Hunter.io free plan: 25 searches/month. "
                    f"This run would use up to {len(api_candidates)} searches "
                    f"(+1 verification each for emails found). Test your key "
                    f"above to see remaining credits.")
+    if lusha_key and api_candidates:
+        st.caption(f"Lusha free plan: ~40 credits/month — 1 credit per email, "
+                   f"~5-10 per phone. This run uses 1 Lusha call per candidate "
+                   f"that still needs an email or phone.")
     run_enrichment("api", api_candidates,
                    lambda: enrich_list(api_candidates, salesql_key, contactout_key,
-                                       hunter_key),
+                                       hunter_key, lusha_key),
                    can_run=can_run)
     download_block("api")
 

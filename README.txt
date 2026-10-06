@@ -43,6 +43,12 @@ This app has no data of its own. Every buyer connects THEIR OWN accounts:
     Needs each candidate's company domain: add a Website/Domain column to
     your sheet, or the app derives it from the company name (marked as
     derived — confirm it).
+  - Lusha: dashboard.lusha.com → API & Integrations → copy your API key.
+    FREE plan (~40 credits/month, no card; API works with strict rate
+    limits). Finds work emails AND phone numbers (direct dials/mobiles) —
+    the phone data the other free APIs lack. 1 credit per email reveal,
+    ~5-10 per phone reveal, so the app only calls Lusha for candidates
+    that still need an email or phone after the other tools.
 
 Keys are typed into password boxes and live ONLY in your browser session
 while the app is open. They are never saved in the code, never written to

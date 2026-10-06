@@ -1,8 +1,9 @@
 """
 Enrichment engine for the Candidate Enrichment Agent.
 
-Queries the buyer's OWN API keys (BYOK model): SalesQL, ContactOut and/or
-Hunter.io, merges the results, and applies the work-email fallback chain:
+Queries the buyer's OWN API keys (BYOK model): SalesQL, ContactOut,
+Hunter.io and/or Lusha, merges the results, and applies the work-email
+fallback chain:
 
     1. Work email from SalesQL / ContactOut / Hunter.io API -> verified by the tool
     2. Work email found on the company website         -> UNVERIFIED
@@ -330,6 +331,129 @@ def derive_domain(company: str) -> str:
     return f"{name}.com"
 
 
+LUSHA_BASE = "https://api.lusha.com"
+
+
+class LushaClient:
+    """Thin client for Lusha's Person Enrichment API v2.
+
+    Docs: https://dashboard.lusha.com/api (key under API & Integrations)
+    Auth:  api_key request header.
+    Free plan: ~40 credits/month, no card; API works on free with strict
+    rate limits (per Lusha's own docs). 1 credit per email reveal,
+    ~5-10 credits per phone reveal. No charge when nothing is found
+    (response field isCreditCharged=false).
+    Returns work emails AND phone numbers (mobile/direct dials) — the
+    phone data the other free APIs lack.
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.session = requests.Session()
+        self.session.headers.update({"api_key": api_key})
+
+    def _check(self, resp: requests.Response, action: str):
+        if resp.status_code == 401:
+            raise EnrichmentAuthError(
+                "Lusha rejected the API key (401). Check the key.")
+        if resp.status_code == 400 and "api key" in resp.text.lower():
+            # Lusha reports malformed/rejected keys as 400, e.g.
+            # {"message": "Invalid API key format"}.
+            raise EnrichmentAuthError(
+                "Lusha rejected the API key (invalid key format). Check the key.")
+        if resp.status_code in (402, 403):
+            raise EnrichmentCreditError(
+                f"Lusha blocked the request ({resp.status_code}) — "
+                "credits/plan issue.")
+        if resp.status_code == 429:
+            raise RuntimeError(
+                "Lusha rate limit hit (429). Slow down and retry.")
+        resp.raise_for_status()
+
+    def usage(self) -> Dict:
+        """GET /account/usage — credit balance. Free, no credits spent."""
+        resp = self.session.get(
+            f"{LUSHA_BASE}/account/usage", timeout=REQUEST_TIMEOUT)
+        self._check(resp, "Lusha usage")
+        return resp.json()
+
+    def enrich_person(self, first_name: Optional[str] = None,
+                      last_name: Optional[str] = None,
+                      company: Optional[str] = None,
+                      domain: Optional[str] = None,
+                      linkedin_url: Optional[str] = None,
+                      email: Optional[str] = None) -> Dict:
+        """GET /v2/person — normalized hit dict (same shape as other clients).
+
+        Needs firstName+lastName+(companyName|companyDomain), or an email,
+        or a linkedinUrl.
+        """
+        params: Dict[str, str] = {}
+        if first_name:
+            params["firstName"] = first_name
+        if last_name:
+            params["lastName"] = last_name
+        if domain:
+            params["companyDomain"] = domain
+        elif company:
+            params["companyName"] = company
+        if email:
+            params["email"] = email
+        if linkedin_url:
+            params["linkedinUrl"] = linkedin_url
+        resp = self.session.get(
+            f"{LUSHA_BASE}/v2/person", params=params,
+            timeout=REQUEST_TIMEOUT)
+        self._check(resp, "Lusha person enrich")
+        return self._normalize(resp.json())
+
+    @staticmethod
+    def _normalize(data: Dict) -> Dict:
+        contact = data.get("contact") or {}
+        err = contact.get("error")
+        if err:
+            return {"source": "Lusha API", "work_emails": [],
+                    "personal_emails": [], "phones": [], "title": "",
+                    "company": "", "note": str(err)[:200],
+                    "credit_charged": contact.get("isCreditCharged", False)}
+        d = contact.get("data") or {}
+        work_emails, personal_emails = [], []
+        for e in d.get("emailAddresses") or []:
+            addr = (e.get("address") or "").strip()
+            if not addr or "@" not in addr:
+                continue
+            etype = (e.get("type") or "").lower()
+            entry = {"email": addr,
+                     "status": e.get("emailConfidence") or ""}
+            if etype == "work":
+                work_emails.append(entry)
+            elif etype in ("personal", "private"):
+                personal_emails.append(entry)
+            else:
+                # Unlabeled -> treated as work; enrich_candidate() re-checks
+                # anything whose domain matches the company domain anyway.
+                work_emails.append(entry)
+        phones = []
+        for p in d.get("phoneNumbers") or []:
+            num = (p.get("number") or "").strip()
+            if num:
+                phones.append({"phone": num,
+                               "type": p.get("phoneType") or ""})
+        jt = d.get("jobTitle") or {}
+        sl = d.get("socialLinks") or {}
+        comp = d.get("company") or {}
+        return {
+            "source": "Lusha API",
+            "work_emails": work_emails,
+            "personal_emails": personal_emails,
+            "phones": phones,
+            "title": jt.get("title") or "",
+            "company": comp.get("name", "") if isinstance(comp, dict) else "",
+            "linkedin_url": sl.get("linkedin") or "",
+            "credit_charged": contact.get("isCreditCharged", False),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Fallback helpers
 # ---------------------------------------------------------------------------
@@ -398,6 +522,7 @@ def enrich_candidate(
     salesql_key: Optional[str] = None,
     contactout_key: Optional[str] = None,
     hunter_key: Optional[str] = None,
+    lusha_key: Optional[str] = None,
     polite_delay: float = 0.4,
 ) -> Dict:
     """Enrich one candidate. Returns a result dict with explicit sources.
@@ -468,10 +593,22 @@ def enrich_candidate(
                 result["personal_email"] = e["email"]
                 result["personal_email_source"] = f"{src} (verified by tool)"
         if not result["work_phone"] and not result["personal_phone"] and hit.get("phones"):
-            # Tools rarely label work vs personal phones; record as found.
-            p = hit["phones"][0]
-            result["personal_phone"] = p["phone"]
-            result["personal_phone_source"] = f"{src} (type not labeled by tool)"
+            # Prefer the tool's own type label when present (Lusha labels
+            # Mobile vs work/direct). Otherwise record as found, unlabeled.
+            for p in hit["phones"]:
+                ptype = (p.get("type") or "").lower()
+                if "mobile" in ptype or "cell" in ptype:
+                    result["personal_phone"] = p["phone"]
+                    result["personal_phone_source"] = f"{src} (mobile)"
+                    break
+                if any(t in ptype for t in ("work", "direct", "office", "business")):
+                    result["work_phone"] = p["phone"]
+                    result["work_phone_source"] = f"{src} (work/direct)"
+                    break
+            else:
+                p = hit["phones"][0]
+                result["personal_phone"] = p["phone"]
+                result["personal_phone_source"] = f"{src} (type not labeled by tool)"
 
     if not api_hits and (salesql_key or contactout_key):
         result["notes"].append("No API data returned for this candidate.")
@@ -532,6 +669,69 @@ def enrich_candidate(
             except Exception as exc:  # per-candidate failure never kills the run
                 result["notes"].append(f"Hunter.io lookup failed: {exc}")
 
+    # --- 3c) Lusha Person Enrichment (work emails + phone numbers).
+    # Phones cost ~5-10 credits each on the free plan (~40/month), so this
+    # runs only when the email or the phone is still missing.
+    if lusha_key and first and last and \
+            (not result["work_email"] or
+             (not result["work_phone"] and not result["personal_phone"])):
+        hdomain = domain or derive_domain(company)
+        try:
+            lclient = LushaClient(lusha_key)
+            hit = lclient.enrich_person(
+                first_name=first, last_name=last,
+                company=company or None, domain=hdomain or None,
+                linkedin_url=linkedin_url or None)
+            time.sleep(polite_delay)
+            if hit.get("note"):
+                result["notes"].append(f"Lusha: {hit['note']}")
+            elif not hit.get("work_emails") and not hit.get("phones"):
+                if hit.get("credit_charged"):
+                    result["notes"].append(
+                        "Lusha found no contacts for this candidate "
+                        "(credits were still charged).")
+                else:
+                    result["notes"].append(
+                        "Lusha found no contacts for this candidate "
+                        "(no credits charged).")
+            else:
+                # Merge through the same field rules as the other tools.
+                h, src = hit, hit.get("source", "")
+                if not result["work_email"] and h.get("work_emails"):
+                    e = h["work_emails"][0]
+                    result["work_email"] = e["email"]
+                    conf = f", confidence {e['status']}" if e.get("status") else ""
+                    result["work_email_source"] = \
+                        f"{src} (verified by tool{conf})"
+                if not result["work_phone"] and not result["personal_phone"] \
+                        and h.get("phones"):
+                    for p in h["phones"]:
+                        ptype = (p.get("type") or "").lower()
+                        if "mobile" in ptype or "cell" in ptype:
+                            result["personal_phone"] = p["phone"]
+                            result["personal_phone_source"] = f"{src} (mobile)"
+                            break
+                        if any(t in ptype for t in
+                               ("work", "direct", "office", "business")):
+                            result["work_phone"] = p["phone"]
+                            result["work_phone_source"] = f"{src} (work/direct)"
+                            break
+                    else:
+                        p = h["phones"][0]
+                        result["personal_phone"] = p["phone"]
+                        result["personal_phone_source"] = \
+                            f"{src} (type not labeled by tool)"
+                if hit.get("linkedin_url") and not linkedin_url:
+                    result["notes"].append(
+                        f"Lusha LinkedIn: {hit['linkedin_url']}")
+                if hit.get("title"):
+                    result["notes"].append(
+                        f"Lusha job title: {hit['title']}")
+        except (EnrichmentAuthError, EnrichmentCreditError):
+            raise
+        except Exception as exc:  # per-candidate failure never kills the run
+            result["notes"].append(f"Lusha lookup failed: {exc}")
+
     # --- 4) Work-email fallback chain (only if the tools found nothing) ---
     if not result["work_email"]:
         if not domain:
@@ -567,8 +767,8 @@ def enrich_candidate(
 
 
 def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
-                hunter_key=None):
+                hunter_key=None, lusha_key=None):
     """Generator yielding (index, candidate, result) for progress display."""
     for i, cand in enumerate(candidates):
         yield i, cand, enrich_candidate(cand, salesql_key, contactout_key,
-                                        hunter_key)
+                                        hunter_key, lusha_key)
