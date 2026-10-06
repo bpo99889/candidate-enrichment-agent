@@ -175,14 +175,15 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     overwritten. Adds a missing contact column at the end if needed.
 
     Work-email highlighting (user's rule):
-    - GREEN: email FOUND on the company website or in the email directory
-    - PINK: email CONSTRUCTED by the agent (pattern-built/guessed)
+    - Work emails from any tool (Hunter, SalesQL, ContactOut, Lusha) stay
+      unhighlighted.
+    - Work emails from company websites, directories, or built/guessed by
+      the agent (all UNVERIFIED) get a PINK highlight.
     Returns xlsx bytes."""
     import io
     from openpyxl import load_workbook
     from openpyxl.styles import PatternFill
 
-    GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
     PINK_FILL = PatternFill("solid", fgColor="FFC7CE")
 
     bio = io.BytesIO(file_bytes)
@@ -222,11 +223,14 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
 
     def _work_email_fill(source: str):
         s = (source or "").lower()
-        if "company website" in s or "hunter directory (unverified" in s:
-            return GREEN_FILL
-        if "built from company email pattern" in s or "pattern-guessed" in s:
-            return PINK_FILL
-        return None
+        # Tool-verified emails stay plain; anything from a website,
+        # directory, or constructed by the agent is UNVERIFIED -> pink.
+        # Note: "hunter.io" (finder) is a tool, but "hunter directory"
+        # is a directory -> pink.
+        if any(t in s for t in ("hunter.io", "salesql", "contactout",
+                                "lusha")):
+            return None
+        return PINK_FILL
 
     for i, (_cand, res) in enumerate(enriched_rows):
         r = i + 2  # 1-indexed + header row
