@@ -614,14 +614,19 @@ def enrich_candidate(
                 result["personal_email"] = e["email"]
                 result["personal_email_source"] = f"{src} (verified by tool)"
         if not result["work_phone"] and not result["personal_phone"] and hit.get("phones"):
-            # All mobile/cell numbers (ContactOut returns phones unlabeled,
-            # treated as mobile) go to the personal number; work/direct
-            # numbers go to the work number. Multiple numbers are joined.
+            # Phone routing per source:
+            # - SalesQL: EVERY number (including "direct") is personal. The
+            #   user takes work email + personal email + phone from SalesQL,
+            #   never a work phone.
+            # - Others (ContactOut etc.): mobile/cell/unlabeled -> personal,
+            #   work/direct/office -> work. Multiple numbers are joined.
             mobiles, works = [], []
+            salesql = "salesql" in src.lower()
             for p in hit["phones"]:
                 ptype = (p.get("type") or "").lower()
                 num = p["phone"]
-                if any(t in ptype for t in ("work", "direct", "office", "business")):
+                if not salesql and any(t in ptype for t in
+                                       ("work", "direct", "office", "business")):
                     if num not in works:
                         works.append(num)
                 elif num not in mobiles:
