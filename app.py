@@ -110,6 +110,8 @@ def upload_block(key: str):
         type=["csv", "xlsx", "xls"], key=f"{key}_up")
     if uploaded is None:
         return []
+    st.session_state[f"{key}_upload_bytes"] = uploaded.getvalue()
+    st.session_state[f"{key}_upload_name"] = uploaded.name
     df = read_upload(uploaded)
     if df is None or df.empty:
         if df is not None:
@@ -167,11 +169,60 @@ def run_enrichment(key: str, candidates, make_iterator, note=None, can_run=None)
         st.success(f"Enriched {len(enriched_rows)} candidates.")
 
 
+def fill_original_sheet(file_bytes, filename, enriched_rows):
+    """Write enriched contact details back into the uploaded sheet's own
+    columns (in place). Only fills blank cells — existing data is never
+    overwritten. Adds a missing contact column at the end if needed.
+    Returns xlsx bytes."""
+    import io
+    bio = io.BytesIO(file_bytes)
+    if filename.lower().endswith(".csv"):
+        df = pd.read_csv(bio)
+    else:
+        df = pd.read_excel(bio)
+    norm = {str(c).strip().lower(): c for c in df.columns}
+    targets = {
+        "work_email": (["work email"], "Work Email"),
+        "personal_email": (["personal email"], "Personal Email"),
+        "personal_phone": (["mobile phone", "personal phone", "mobile"],
+                           "Mobile Phone"),
+        "work_phone": (["work phone", "work direct phone", "direct phone",
+                        "office phone"], "Work Phone"),
+    }
+    colmap = {}
+    for field, (aliases, new_name) in targets.items():
+        found = next((norm[a] for a in aliases if a in norm), None)
+        if found is None:
+            df[new_name] = ""
+            found = new_name
+        colmap[field] = found
+        df[found] = df[found].astype(object).where(df[found].notna(), "")
+    for i, (_cand, res) in enumerate(enriched_rows):
+        if i >= len(df):
+            break
+        vals = {
+            "work_email": res.get("work_email") or "",
+            "personal_email": res.get("personal_email") or "",
+            "personal_phone": res.get("personal_phone") or "",
+            "work_phone": res.get("work_phone") or "",
+        }
+        for field, col in colmap.items():
+            if vals[field]:
+                cur = df.at[i, col]
+                if cur == "" or (isinstance(cur, float) and pd.isna(cur)) \
+                        or str(cur).strip() in ("", "nan", "None"):
+                    df.at[i, col] = vals[field]
+    out = io.BytesIO()
+    df.to_excel(out, index=False)
+    return out.getvalue()
+
+
 def download_block(key: str):
-    """Results preview + workbook download for a tab."""
+    """Results preview + downloads for a tab: filled-in original sheet
+    first, then the 3-sheet workbook."""
     enriched_rows = st.session_state.get(f"{key}_enriched", [])
     if not enriched_rows:
-        st.caption("Your workbook download will appear here after enrichment.")
+        st.caption("Your download will appear here after enrichment.")
         return
     summary = pd.DataFrame([
         {
@@ -184,6 +235,18 @@ def download_block(key: str):
         for c, r in enriched_rows
     ])
     st.dataframe(summary, use_container_width=True)
+    up_bytes = st.session_state.get(f"{key}_upload_bytes")
+    up_name = st.session_state.get(f"{key}_upload_name", "candidates.xlsx")
+    if up_bytes:
+        filled = fill_original_sheet(up_bytes, up_name, enriched_rows)
+        base = up_name.rsplit(".", 1)[0]
+        st.download_button(
+            "⬇️ Download your sheet with details filled in",
+            data=filled,
+            file_name=f"{base}_enriched.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{key}_dl_filled",
+        )
     xlsx_bytes = build_workbook(enriched_rows)
     st.download_button(
         "⬇️ Download 3-sheet Excel workbook",

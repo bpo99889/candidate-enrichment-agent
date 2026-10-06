@@ -438,9 +438,11 @@ def login_enrich_candidate(page, provider: str, candidate: Dict) -> Dict:
         result["personal_email_source"] = (
             f"{provider.title()} web login (page-scraped — confirm before use)")
     if phones:
-        result["personal_phone"] = phones[0]
+        # All ContactOut numbers are mobile/personal (page shows no type
+        # labels) — every one goes to the personal number.
+        result["personal_phone"] = "; ".join(dict.fromkeys(phones))
         result["personal_phone_source"] = (
-            f"{provider.title()} web login (type not labeled)")
+            f"{provider.title()} web login (mobile)")
 
     # Same fallback chain as the API engine when the web lookup found nothing.
     if not result["work_email"]:

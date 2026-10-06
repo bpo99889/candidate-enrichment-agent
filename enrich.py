@@ -614,22 +614,24 @@ def enrich_candidate(
                 result["personal_email"] = e["email"]
                 result["personal_email_source"] = f"{src} (verified by tool)"
         if not result["work_phone"] and not result["personal_phone"] and hit.get("phones"):
-            # Prefer the tool's own type label when present (Lusha labels
-            # Mobile vs work/direct). Otherwise record as found, unlabeled.
+            # All mobile/cell numbers (ContactOut returns phones unlabeled,
+            # treated as mobile) go to the personal number; work/direct
+            # numbers go to the work number. Multiple numbers are joined.
+            mobiles, works = [], []
             for p in hit["phones"]:
                 ptype = (p.get("type") or "").lower()
-                if "mobile" in ptype or "cell" in ptype:
-                    result["personal_phone"] = p["phone"]
-                    result["personal_phone_source"] = f"{src} (mobile)"
-                    break
+                num = p["phone"]
                 if any(t in ptype for t in ("work", "direct", "office", "business")):
-                    result["work_phone"] = p["phone"]
-                    result["work_phone_source"] = f"{src} (work/direct)"
-                    break
-            else:
-                p = hit["phones"][0]
-                result["personal_phone"] = p["phone"]
-                result["personal_phone_source"] = f"{src} (type not labeled by tool)"
+                    if num not in works:
+                        works.append(num)
+                elif num not in mobiles:
+                    mobiles.append(num)
+            if mobiles:
+                result["personal_phone"] = "; ".join(mobiles)
+                result["personal_phone_source"] = f"{src} (mobile)"
+            if works:
+                result["work_phone"] = "; ".join(works)
+                result["work_phone_source"] = f"{src} (work/direct)"
 
     if not api_hits and (salesql_key or contactout_key):
         result["notes"].append("No API data returned for this candidate.")
