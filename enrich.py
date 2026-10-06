@@ -833,13 +833,18 @@ def enrich_candidate(
     # the company's real pattern) -> blind pattern guess from the domain.
     # Everything here is UNVERIFIED and labeled as such.
     if not result["work_email"]:
-        if not domain:
+        fbdomain = domain or derive_domain(company)
+        if not fbdomain:
             result["notes"].append(
                 "Work email not found via tools; company domain unknown so "
                 "pattern/website fallback was skipped."
             )
         else:
-            website_hits = find_email_on_website(domain, first, last)
+            if not domain:
+                result["notes"].append(
+                    f"Company domain '{fbdomain}' was derived from the company "
+                    f"name — confirm it is correct.")
+            website_hits = find_email_on_website(fbdomain, first, last)
             if website_hits:
                 result["work_email"] = website_hits[0]
                 result["work_email_source"] = "company website (UNVERIFIED — confirm before use)"
@@ -857,7 +862,7 @@ def enrich_candidate(
                     # the company's pattern and build it (pink).
                     try:
                         hclient = HunterClient(hunter_key)
-                        ds = hclient.domain_search(domain)
+                        ds = hclient.domain_search(fbdomain)
                         time.sleep(polite_delay)
                         if ds:
                             for e in ds.get("emails") or []:
@@ -867,7 +872,7 @@ def enrich_candidate(
                                     break
                             if not directory_email and ds.get("pattern"):
                                 directory_email = build_from_pattern(
-                                    first, last, ds["pattern"], domain)
+                                    first, last, ds["pattern"], fbdomain)
                             if ds.get("pattern"):
                                 result["notes"].append(
                                     f"Hunter directory shows this company uses "
@@ -885,7 +890,7 @@ def enrich_candidate(
                         "built from company email pattern (UNVERIFIED — "
                         "verify before use)")
                 else:
-                    guesses = guess_work_emails(first, last, domain)
+                    guesses = guess_work_emails(first, last, fbdomain)
                     if guesses:
                         result["work_email"] = guesses[0]
                         result["work_email_source"] = (
