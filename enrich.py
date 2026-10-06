@@ -335,16 +335,16 @@ LUSHA_BASE = "https://api.lusha.com"
 
 
 class LushaClient:
-    """Thin client for Lusha's Person Enrichment API v2.
+    """Thin client for Lusha's Contacts Search & Enrich API v3.
 
-    Docs: https://dashboard.lusha.com/api (key under API & Integrations)
-    Auth:  api_key request header.
-    Free plan: ~40 credits/month, no card; API works on free with strict
-    rate limits (per Lusha's own docs). 1 credit per email reveal,
-    ~5-10 credits per phone reveal. No charge when nothing is found
-    (response field isCreditCharged=false).
-    Returns work emails AND phone numbers (mobile/direct dials) — the
-    phone data the other free APIs lack.
+    Docs: https://docs.lusha.com (official v3 reference)
+    Auth:  api_key request header (key from dashboard.lusha.com).
+    Free plan: ~40 credits/month, no card; every user gets an API key,
+    including on Free (per Lusha's docs). Two charges per result: one for
+    the search plus one per revealed field (email ~1, phone ~5); the
+    response reports billing.creditsCharged. The `reveal` parameter
+    controls what gets unlocked, so we only ask for what is still missing.
+    V2 (GET /v2/person) is being sunset — v3 is the current build.
     """
 
     def __init__(self, api_key: str):
@@ -361,87 +361,108 @@ class LushaClient:
             # {"message": "Invalid API key format"}.
             raise EnrichmentAuthError(
                 "Lusha rejected the API key (invalid key format). Check the key.")
-        if resp.status_code in (402, 403):
+        if resp.status_code == 402:
             raise EnrichmentCreditError(
-                f"Lusha blocked the request ({resp.status_code}) — "
-                "credits/plan issue.")
+                "Lusha: out of credits (402). The free plan resets monthly.")
+        if resp.status_code == 403:
+            msg = resp.text.lower()
+            if "v3" in msg and "not enabled" in msg:
+                raise EnrichmentAuthError(
+                    "Lusha: V3 API access is not enabled on this account "
+                    "(403). Contact Lusha support.")
+            raise EnrichmentCreditError(
+                "Lusha blocked the request (403) — account/plan issue.")
         if resp.status_code == 429:
             raise RuntimeError(
                 "Lusha rate limit hit (429). Slow down and retry.")
         resp.raise_for_status()
 
     def usage(self) -> Dict:
-        """GET /account/usage — credit balance. Free, no credits spent."""
-        resp = self.session.get(
-            f"{LUSHA_BASE}/account/usage", timeout=REQUEST_TIMEOUT)
-        self._check(resp, "Lusha usage")
-        return resp.json()
+        """GET /v3/account/usage — credit balance. Free, no credits spent."""
+        for path in ("/v3/account/usage", "/account/usage"):
+            resp = self.session.get(
+                f"{LUSHA_BASE}{path}", timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 404:
+                continue
+            self._check(resp, "Lusha usage")
+            return resp.json()
+        return {"note": "usage endpoint not reachable on this plan"}
 
     def enrich_person(self, first_name: Optional[str] = None,
                       last_name: Optional[str] = None,
                       company: Optional[str] = None,
                       domain: Optional[str] = None,
                       linkedin_url: Optional[str] = None,
-                      email: Optional[str] = None) -> Dict:
-        """GET /v2/person — normalized hit dict (same shape as other clients).
+                      email: Optional[str] = None,
+                      reveal: Optional[List[str]] = None) -> Dict:
+        """POST /v3/contacts/search-and-enrich — normalized hit dict.
 
-        Needs firstName+lastName+(companyName|companyDomain), or an email,
-        or a linkedinUrl.
+        reveal: subset of ["emails", "phones"] — only requested fields are
+        unlocked and charged. Defaults to both.
         """
-        params: Dict[str, str] = {}
+        contact: Dict[str, str] = {"clientReferenceId": "c0"}
         if first_name:
-            params["firstName"] = first_name
+            contact["firstName"] = first_name
         if last_name:
-            params["lastName"] = last_name
+            contact["lastName"] = last_name
+        if company:
+            contact["companyName"] = company
         if domain:
-            params["companyDomain"] = domain
-        elif company:
-            params["companyName"] = company
-        if email:
-            params["email"] = email
+            contact["companyDomain"] = domain
         if linkedin_url:
-            params["linkedinUrl"] = linkedin_url
-        resp = self.session.get(
-            f"{LUSHA_BASE}/v2/person", params=params,
-            timeout=REQUEST_TIMEOUT)
-        self._check(resp, "Lusha person enrich")
+            contact["linkedinUrl"] = linkedin_url
+        if email:
+            contact["email"] = email
+        body = {
+            "contacts": [contact],
+            "reveal": reveal or ["emails", "phones"],
+            "options": {"includePartialProfiles": True},
+        }
+        resp = self.session.post(
+            f"{LUSHA_BASE}/v3/contacts/search-and-enrich",
+            json=body, timeout=REQUEST_TIMEOUT)
+        self._check(resp, "Lusha search-and-enrich")
         return self._normalize(resp.json())
 
     @staticmethod
     def _normalize(data: Dict) -> Dict:
-        contact = data.get("contact") or {}
-        err = contact.get("error")
+        results = data.get("results") or []
+        billing = data.get("billing") or {}
+        credits = billing.get("creditsCharged")
+        if not results:
+            return {"source": "Lusha API", "work_emails": [],
+                    "personal_emails": [], "phones": [], "title": "",
+                    "company": "", "note": "no match",
+                    "credits_charged": credits}
+        r = results[0]
+        err = r.get("error")
         if err:
             return {"source": "Lusha API", "work_emails": [],
                     "personal_emails": [], "phones": [], "title": "",
                     "company": "", "note": str(err)[:200],
-                    "credit_charged": contact.get("isCreditCharged", False)}
-        d = contact.get("data") or {}
+                    "credits_charged": credits}
         work_emails, personal_emails = [], []
-        for e in d.get("emailAddresses") or []:
-            addr = (e.get("address") or "").strip()
+        for e in r.get("emails") or []:
+            addr = (e.get("email") or "").strip()
             if not addr or "@" not in addr:
                 continue
             etype = (e.get("type") or "").lower()
-            entry = {"email": addr,
-                     "status": e.get("emailConfidence") or ""}
-            if etype == "work":
-                work_emails.append(entry)
-            elif etype in ("personal", "private"):
+            entry = {"email": addr, "status": e.get("confidence") or ""}
+            if etype in ("private", "personal"):
                 personal_emails.append(entry)
             else:
-                # Unlabeled -> treated as work; enrich_candidate() re-checks
-                # anything whose domain matches the company domain anyway.
+                # "work" (and untyped) -> treated as work; enrich_candidate()
+                # re-checks anything whose domain matches the company domain.
                 work_emails.append(entry)
         phones = []
-        for p in d.get("phoneNumbers") or []:
+        for p in r.get("phones") or []:
             num = (p.get("number") or "").strip()
-            if num:
-                phones.append({"phone": num,
-                               "type": p.get("phoneType") or ""})
-        jt = d.get("jobTitle") or {}
-        sl = d.get("socialLinks") or {}
-        comp = d.get("company") or {}
+            if num and not p.get("doNotCall"):
+                phones.append({"phone": num, "type": p.get("type") or ""})
+        jt = r.get("jobTitle") or {}
+        sl = r.get("socialLinks") or {}
+        comp = r.get("company") or {}
+        missing = r.get("missingDataPoints") or []
         return {
             "source": "Lusha API",
             "work_emails": work_emails,
@@ -450,11 +471,11 @@ class LushaClient:
             "title": jt.get("title") or "",
             "company": comp.get("name", "") if isinstance(comp, dict) else "",
             "linkedin_url": sl.get("linkedin") or "",
-            "credit_charged": contact.get("isCreditCharged", False),
+            "credits_charged": credits,
+            "missing": missing,
         }
 
 
-# ---------------------------------------------------------------------------
 # Fallback helpers
 # ---------------------------------------------------------------------------
 
@@ -669,24 +690,34 @@ def enrich_candidate(
             except Exception as exc:  # per-candidate failure never kills the run
                 result["notes"].append(f"Hunter.io lookup failed: {exc}")
 
-    # --- 3c) Lusha Person Enrichment (work emails + phone numbers).
-    # Phones cost ~5-10 credits each on the free plan (~40/month), so this
-    # runs only when the email or the phone is still missing.
-    if lusha_key and first and last and \
-            (not result["work_email"] or
-             (not result["work_phone"] and not result["personal_phone"])):
+    # --- 3c) Lusha Search & Enrich v3 (work emails + phone numbers).
+    # Free plan is ~40 credits/month; v3 charges one for the search plus one
+    # per revealed field. We reveal ONLY what is still missing, so a
+    # candidate who already has an email doesn't pay for another email.
+    need_email = not result["work_email"]
+    need_phone = not result["work_phone"] and not result["personal_phone"]
+    if lusha_key and first and last and (need_email or need_phone):
         hdomain = domain or derive_domain(company)
         try:
             lclient = LushaClient(lusha_key)
+            reveal = []
+            if need_email:
+                reveal.append("emails")
+            if need_phone:
+                reveal.append("phones")
             hit = lclient.enrich_person(
                 first_name=first, last_name=last,
                 company=company or None, domain=hdomain or None,
-                linkedin_url=linkedin_url or None)
+                linkedin_url=linkedin_url or None, reveal=reveal)
             time.sleep(polite_delay)
+            credits = hit.get("credits_charged")
+            if credits:
+                result["notes"].append(
+                    f"Lusha charged {credits} credit(s) for this candidate.")
             if hit.get("note"):
                 result["notes"].append(f"Lusha: {hit['note']}")
             elif not hit.get("work_emails") and not hit.get("phones"):
-                if hit.get("credit_charged"):
+                if credits:
                     result["notes"].append(
                         "Lusha found no contacts for this candidate "
                         "(credits were still charged).")

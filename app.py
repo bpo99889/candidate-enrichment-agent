@@ -263,7 +263,7 @@ with tab_api:
     with c4:
         lusha_key = st.text_input(
             "Lusha API key", type="password", key="api_lusha",
-            help="dashboard.lusha.com → API & Integrations. Free plan: ~40 credits/month, no card. Finds work emails AND phone numbers (phones cost ~5-10 credits each).",
+            help="dashboard.lusha.com → API & Integrations. Free plan: ~40 credits/month, no card. Finds work emails AND phone numbers (1 credit/email, ~5/phone).",
         ) or None
     t1, t2, t3 = st.columns(3)
     with t1:
@@ -323,8 +323,9 @@ with tab_api:
                    f"above to see remaining credits.")
     if lusha_key and api_candidates:
         st.caption(f"Lusha free plan: ~40 credits/month — 1 credit per email, "
-                   f"~5-10 per phone. This run uses 1 Lusha call per candidate "
-                   f"that still needs an email or phone.")
+                   f"~5 per phone. This run uses 1 Lusha call per candidate "
+                   f"that still needs an email or phone, revealing only "
+                   f"what's missing (~1-7 credits each).")
     run_enrichment("api", api_candidates,
                    lambda: enrich_list(api_candidates, salesql_key, contactout_key,
                                        hunter_key, lusha_key),
