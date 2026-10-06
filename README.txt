@@ -37,6 +37,12 @@ This app has no data of its own. Every buyer connects THEIR OWN accounts:
   - ContactOut: dashboard → API section → copy your API token. Paste it
     in the app's sidebar. Needs a paid plan (Basic $49/month and up
     includes API access).
+  - Hunter.io: hunter.io → Dashboard → API → copy your API key. FREE plan
+    needs no credit card: 25 searches + 50 verifications per month — good
+    for testing. Finds WORK emails only (no personal emails, no phones).
+    Needs each candidate's company domain: add a Website/Domain column to
+    your sheet, or the app derives it from the company name (marked as
+    derived — confirm it).
 
 Keys are typed into password boxes and live ONLY in your browser session
 while the app is open. They are never saved in the code, never written to

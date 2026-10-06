@@ -1,10 +1,10 @@
 """
 Enrichment engine for the Candidate Enrichment Agent.
 
-Queries the buyer's OWN SalesQL and/or ContactOut API keys (BYOK model),
-merges the results, and applies the work-email fallback chain:
+Queries the buyer's OWN API keys (BYOK model): SalesQL, ContactOut and/or
+Hunter.io, merges the results, and applies the work-email fallback chain:
 
-    1. Work email from SalesQL / ContactOut API        -> verified by the tool
+    1. Work email from SalesQL / ContactOut / Hunter.io API -> verified by the tool
     2. Work email found on the company website         -> UNVERIFIED
     3. Work email built from common patterns          -> UNVERIFIED (pattern-guessed)
     4. Nothing found                                  -> left blank, never invented silently
@@ -231,6 +231,105 @@ class ContactOutClient:
         }
 
 
+HUNTER_BASE = "https://api.hunter.io/v2"
+
+
+class HunterClient:
+    """Thin client for the Hunter.io API v2.
+
+    Docs: https://hunter.io/api-documentation/v2
+    Auth:  api_key query parameter (key from Hunter dashboard).
+    Free plan: 25 searches + 50 verifications/month, no credit card.
+    Provides WORK emails only (no personal emails, no phone lookup API —
+    Email Finder sometimes returns a phone number, captured when present).
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def _get(self, endpoint: str, params: Dict, action: str) -> Dict:
+        params = dict(params)
+        params["api_key"] = self.api_key
+        try:
+            resp = requests.get(
+                f"{HUNTER_BASE}/{endpoint}", params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Hunter.io request failed: {exc}")
+        if resp.status_code == 401:
+            raise EnrichmentAuthError(
+                "Hunter.io rejected the API key (401). Check the key.")
+        if resp.status_code in (402, 403):
+            raise EnrichmentCreditError(
+                f"Hunter.io blocked the request ({resp.status_code}) — "
+                "credits/plan issue.")
+        if resp.status_code == 429:
+            raise EnrichmentCreditError(
+                "Hunter.io usage limit reached (429). The free plan allows "
+                "25 searches + 50 verifications per month.")
+        if resp.status_code == 451:
+            raise RuntimeError(
+                "Hunter.io cannot process this person (451, legal block).")
+        resp.raise_for_status()
+        return resp.json()
+
+    def account(self) -> Dict:
+        """GET /v2/account — plan + remaining searches/verifications. Free."""
+        data = self._get("account", {}, "account").get("data", {})
+        reqs = data.get("requests", {})
+        searches = reqs.get("searches", {})
+        verifs = reqs.get("verifications", {})
+        return {
+            "plan": data.get("plan_name", "?"),
+            "searches_used": searches.get("used", "?"),
+            "searches_available": searches.get("available", "?"),
+            "verifications_used": verifs.get("used", "?"),
+            "verifications_available": verifs.get("available", "?"),
+            "reset_date": data.get("reset_date", ""),
+        }
+
+    def email_finder(self, first_name: str, last_name: str,
+                     domain: str) -> Optional[Dict]:
+        """GET /v2/email-finder. 1 search credit. Returns None if not found."""
+        data = self._get(
+            "email-finder",
+            {"first_name": first_name, "last_name": last_name,
+             "domain": domain},
+            "email finder",
+        ).get("data", {})
+        email = (data.get("email") or "").strip()
+        if not email:
+            return None
+        return {
+            "email": email,
+            "score": data.get("score"),          # 0-100 confidence
+            "domain": data.get("domain") or domain,
+            "phone": (data.get("phone_number") or "").strip() or None,
+            "position": data.get("position") or "",
+        }
+
+    def email_verifier(self, email: str) -> Dict:
+        """GET /v2/email-verifier. 1 verification credit."""
+        return self._get(
+            "email-verifier", {"email": email}, "email verifier"
+        ).get("data", {})
+
+
+def derive_domain(company: str) -> str:
+    """Best-effort company name -> domain guess (e.g. 'Acme Inc' -> acme.com).
+
+    NEVER presented as verified; Hunter.io itself validates by returning
+    (or not returning) a result for the domain.
+    """
+    name = (company or "").lower()
+    name = re.sub(r"\b(inc|llc|ltd|corp|co|company|group|holdings|partners|associates|services|solutions)\b\.?", "", name)
+    name = re.sub(r"[^a-z0-9]", "", name)
+    if len(name) < 3:
+        return ""
+    return f"{name}.com"
+
+
 # ---------------------------------------------------------------------------
 # Fallback helpers
 # ---------------------------------------------------------------------------
@@ -298,6 +397,7 @@ def enrich_candidate(
     candidate: Dict,
     salesql_key: Optional[str] = None,
     contactout_key: Optional[str] = None,
+    hunter_key: Optional[str] = None,
     polite_delay: float = 0.4,
 ) -> Dict:
     """Enrich one candidate. Returns a result dict with explicit sources.
@@ -376,6 +476,62 @@ def enrich_candidate(
     if not api_hits and (salesql_key or contactout_key):
         result["notes"].append("No API data returned for this candidate.")
 
+    # --- 3b) Hunter.io Email Finder + Verifier (work emails only).
+    # Runs only if the tools above found no work email yet, to save credits.
+    # Free plan: 25 searches + 50 verifications/month.
+    if hunter_key and not result["work_email"] and first and last:
+        hdomain = domain or derive_domain(company)
+        if not hdomain:
+            result["notes"].append(
+                "Hunter.io skipped: no company domain (add a Website/Domain "
+                "column to the sheet).")
+        else:
+            if not domain:
+                result["notes"].append(
+                    f"Hunter.io used derived domain '{hdomain}' from the "
+                    "company name — confirm it is correct.")
+            try:
+                hclient = HunterClient(hunter_key)
+                found = hclient.email_finder(first, last, hdomain)
+                time.sleep(polite_delay)
+                if found and found.get("email"):
+                    email = found["email"]
+                    score = found.get("score")
+                    verified = False
+                    try:
+                        v = hclient.email_verifier(email)
+                        time.sleep(polite_delay)
+                        if str(v.get("result", "")).lower() == "deliverable":
+                            verified = True
+                    except (EnrichmentAuthError, EnrichmentCreditError):
+                        raise
+                    except Exception:
+                        pass  # verifier failed; keep the finder result as-is
+                    result["work_email"] = email
+                    if verified:
+                        result["work_email_source"] = \
+                            "Hunter.io (verified deliverable)"
+                    elif score:
+                        result["work_email_source"] = (
+                            f"Hunter.io Email Finder (confidence {score}% — "
+                            "verify before use)")
+                    else:
+                        result["work_email_source"] = \
+                            "Hunter.io Email Finder (unverified — confirm before use)"
+                    if found.get("phone") and not result["personal_phone"] \
+                            and not result["work_phone"]:
+                        result["personal_phone"] = found["phone"]
+                        result["personal_phone_source"] = \
+                            "Hunter.io (type not labeled by tool)"
+                else:
+                    result["notes"].append(
+                        f"Hunter.io: no email found for {first} {last} "
+                        f"at {hdomain}.")
+            except (EnrichmentAuthError, EnrichmentCreditError):
+                raise
+            except Exception as exc:  # per-candidate failure never kills the run
+                result["notes"].append(f"Hunter.io lookup failed: {exc}")
+
     # --- 4) Work-email fallback chain (only if the tools found nothing) ---
     if not result["work_email"]:
         if not domain:
@@ -410,7 +566,9 @@ def enrich_candidate(
     return result
 
 
-def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None):
+def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
+                hunter_key=None):
     """Generator yielding (index, candidate, result) for progress display."""
     for i, cand in enumerate(candidates):
-        yield i, cand, enrich_candidate(cand, salesql_key, contactout_key)
+        yield i, cand, enrich_candidate(cand, salesql_key, contactout_key,
+                                        hunter_key)

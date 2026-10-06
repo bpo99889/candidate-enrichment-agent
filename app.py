@@ -243,7 +243,7 @@ with tab_api:
     st.info("**API key mode (recommended for real use)** — paste YOUR OWN keys. "
             "Keys stay in this browser session only; lookups spend credits "
             "from your accounts.")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         salesql_key = st.text_input(
             "SalesQL API key", type="password", key="api_sql",
@@ -254,25 +254,56 @@ with tab_api:
             "ContactOut API token", type="password", key="api_co",
             help="ContactOut dashboard → API. Needs a paid plan.",
         ) or None
-    if st.button("Test ContactOut key (free, no credits spent)", key="api_test"):
-        if not contactout_key:
-            st.error("Paste your ContactOut token first.")
-        else:
-            try:
-                from enrich import ContactOutClient
-                stats = ContactOutClient(contactout_key).stats()
-                st.success(f"Key works. Credit info: {stats}")
-            except EnrichmentAuthError as e:
-                st.error(str(e))
-            except Exception as e:
-                st.error(f"Key check failed: {e}")
+    with c3:
+        hunter_key = st.text_input(
+            "Hunter.io API key", type="password", key="api_hunter",
+            help="hunter.io → Dashboard → API. Free plan: 25 searches + 50 verifications/month, no card. Finds WORK emails only.",
+        ) or None
+    t1, t2 = st.columns(2)
+    with t1:
+        if st.button("Test ContactOut key (free, no credits spent)", key="api_test"):
+            if not contactout_key:
+                st.error("Paste your ContactOut token first.")
+            else:
+                try:
+                    from enrich import ContactOutClient
+                    stats = ContactOutClient(contactout_key).stats()
+                    st.success(f"Key works. Credit info: {stats}")
+                except EnrichmentAuthError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Key check failed: {e}")
+    with t2:
+        if st.button("Test Hunter.io key (free)", key="api_test_hunter"):
+            if not hunter_key:
+                st.error("Paste your Hunter.io API key first.")
+            else:
+                try:
+                    from enrich import HunterClient
+                    acct = HunterClient(hunter_key).account()
+                    st.success(
+                        f"Key works. Plan: {acct['plan']} — searches: "
+                        f"{acct['searches_used']}/{acct['searches_available']} used, "
+                        f"verifications: {acct['verifications_used']}/"
+                        f"{acct['verifications_available']} used."
+                    )
+                except EnrichmentAuthError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Key check failed: {e}")
 
     api_candidates = upload_block("api")
-    can_run = bool(api_candidates) and (salesql_key or contactout_key)
-    if api_candidates and not (salesql_key or contactout_key):
+    can_run = bool(api_candidates) and (salesql_key or contactout_key or hunter_key)
+    if api_candidates and not (salesql_key or contactout_key or hunter_key):
         st.warning("Paste at least one API key above to run.")
+    if hunter_key and api_candidates:
+        st.caption(f"Hunter.io free plan: 25 searches/month. "
+                   f"This run would use up to {len(api_candidates)} searches "
+                   f"(+1 verification each for emails found). Test your key "
+                   f"above to see remaining credits.")
     run_enrichment("api", api_candidates,
-                   lambda: enrich_list(api_candidates, salesql_key, contactout_key),
+                   lambda: enrich_list(api_candidates, salesql_key, contactout_key,
+                                       hunter_key),
                    can_run=can_run)
     download_block("api")
 
