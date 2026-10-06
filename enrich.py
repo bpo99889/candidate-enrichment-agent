@@ -316,6 +316,43 @@ class HunterClient:
             "email-verifier", {"email": email}, "email verifier"
         ).get("data", {})
 
+    def domain_search(self, domain: str) -> Optional[Dict]:
+        """GET /v2/domain-search — the domain's email directory: known
+        emails + the company's email pattern. 1 search credit.
+        Returns None if the domain has no usable data."""
+        data = self._get(
+            "domain-search", {"domain": domain, "limit": 10},
+            "domain search",
+        ).get("data", {})
+        pattern = (data.get("pattern") or "").strip()
+        emails = data.get("emails") or []
+        if not pattern and not emails:
+            return None
+        return {"pattern": pattern,
+                "emails": [e.get("value") for e in emails if e.get("value")]}
+
+
+def build_from_pattern(first_name: str, last_name: str,
+                       pattern: str, domain: str) -> str:
+    """Build an email from Hunter's directory pattern, e.g. '{first}.{last}'
+    -> 'jane.doe@acme.com'. Returns '' if the pattern is unusable."""
+    first = re.sub(r"[^a-z]", "", (first_name or "").lower())
+    last = re.sub(r"[^a-z]", "", (last_name or "").lower())
+    domain = (domain or "").strip().lower()
+    if not (first and last and pattern and domain and "." in domain):
+        return ""
+    local = pattern.lower()
+    local = local.replace("{first}", first).replace("{last}", last)
+    local = local.replace("{f}", first[:1]).replace("{l}", last[:1])
+    local = local.replace("{first_initial}", first[:1])
+    local = local.replace("{last_initial}", last[:1])
+    if "{" in local or "}" in local:
+        return ""  # unreplaced placeholder -> pattern unusable
+    local = re.sub(r"[^a-z0-9._-]", "", local)
+    if not local:
+        return ""
+    return f"{local}@{domain}"
+
 
 def derive_domain(company: str) -> str:
     """Best-effort company name -> domain guess (e.g. 'Acme Inc' -> acme.com).
@@ -780,6 +817,9 @@ def enrich_candidate(
             result["notes"].append(f"Lusha lookup failed: {exc}")
 
     # --- 4) Work-email fallback chain (only if the tools found nothing) ---
+    # Order: company website -> email directory (Hunter domain search learns
+    # the company's real pattern) -> blind pattern guess from the domain.
+    # Everything here is UNVERIFIED and labeled as such.
     if not result["work_email"]:
         if not domain:
             result["notes"].append(
@@ -796,18 +836,44 @@ def enrich_candidate(
                         f"Other name-matching emails on site: {', '.join(website_hits[1:3])}"
                     )
             else:
-                guesses = guess_work_emails(first, last, domain)
-                if guesses:
-                    result["work_email"] = guesses[0]
-                    result["work_email_source"] = (
-                        "pattern-guessed (UNVERIFIED — do not use without verification)"
-                    )
-                    if len(guesses) > 1:
+                directory_email = ""
+                if hunter_key:
+                    # Directory step: learn the company's real email pattern,
+                    # then build this candidate's address from it (1 search).
+                    try:
+                        hclient = HunterClient(hunter_key)
+                        ds = hclient.domain_search(domain)
+                        time.sleep(polite_delay)
+                        if ds and ds.get("pattern"):
+                            directory_email = build_from_pattern(
+                                first, last, ds["pattern"], domain)
+                            if directory_email:
+                                result["notes"].append(
+                                    f"Hunter directory shows this company uses "
+                                    f"pattern '{ds['pattern']}'.")
+                    except (EnrichmentAuthError, EnrichmentCreditError):
+                        raise
+                    except Exception as exc:
                         result["notes"].append(
-                            f"Other common patterns to try: {', '.join(guesses[1:4])}"
-                        )
+                            f"Hunter directory lookup failed: {exc}")
+                if directory_email:
+                    result["work_email"] = directory_email
+                    result["work_email_source"] = (
+                        "built from company email pattern (UNVERIFIED — "
+                        "verify before use)")
                 else:
-                    result["notes"].append("Work email not found; could not build a pattern.")
+                    guesses = guess_work_emails(first, last, domain)
+                    if guesses:
+                        result["work_email"] = guesses[0]
+                        result["work_email_source"] = (
+                            "pattern-guessed from company domain (UNVERIFIED — "
+                            "do not use without verification)")
+                        if len(guesses) > 1:
+                            result["notes"].append(
+                                f"Other common patterns to try: {', '.join(guesses[1:4])}"
+                            )
+                    else:
+                        result["notes"].append("Work email not found; could not build a pattern.")
 
     result["notes"] = "; ".join(result["notes"])
     return result
