@@ -39,7 +39,7 @@ SHEETS = {
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
-UNVERIFIED_FILL = PatternFill("solid", fgColor="FFF2CC")
+UNVERIFIED_FILL = PatternFill("solid", fgColor="FFF2CC")  # light amber
 
 
 def _style_header(ws, ncols):
@@ -97,6 +97,7 @@ def build_workbook(enriched_rows):
         ws.append(headers)
         for cand, res in enriched_rows:
             ws.append(_row_for_sheet(sheet_name, cand, res))
+        # highlight unverified work-email cells/sources
         src_col = None
         for idx, h in enumerate(headers, start=1):
             if "Source" in h and "Work" in h:
@@ -114,6 +115,7 @@ def build_workbook(enriched_rows):
                 src_val = str(row[src_col - 1].value or "")
                 if "UNVERIFIED" in src_val.upper():
                     row[email_col - 1].fill = copy(UNVERIFIED_FILL)
+        # column widths
         widths = {"A": 14, "B": 14, "C": 26, "D": 28, "E": 34}
         for col_letter, w in widths.items():
             ws.column_dimensions[col_letter].width = w

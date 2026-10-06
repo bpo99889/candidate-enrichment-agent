@@ -1,0 +1,70 @@
+================================================================
+CANDIDATE ENRICHMENT AGENT — Run on your own computer (Mac)
+================================================================
+Why: logging in to ContactOut from your home internet looks like a
+normal person signing in, so it works where the website version can't.
+
+You only do this setup ONCE. After that, starting the app is one line.
+
+----------------------------------------------------------------
+STEP 1 — Install Python (5 minutes)
+----------------------------------------------------------------
+1. Go to: https://www.python.org/downloads/
+2. Click the big yellow "Download Python" button.
+3. Run the downloaded .pkg installer (keep clicking Continue).
+
+----------------------------------------------------------------
+STEP 2 — Unzip the app folder
+----------------------------------------------------------------
+1. Unzip the enrichment-agent.zip file you got from me.
+2. Put the unzipped "enrichment-agent" folder somewhere easy,
+   e.g. your Desktop.
+
+----------------------------------------------------------------
+STEP 3 — Install the app's pieces (one time, ~10 minutes)
+----------------------------------------------------------------
+1. Open the Terminal app (Spotlight search: "Terminal").
+2. Type:  cd   then a space, then DRAG the "enrichment-agent"
+   folder into the Terminal window, and press Enter.
+3. Copy-paste this line, press Enter, and wait until it finishes:
+       pip3 install -r requirements.txt
+4. Copy-paste this line, press Enter, and wait until it finishes:
+       playwright install chromium
+   (If it says "playwright: command not found", use:
+       python3 -m playwright install chromium)
+
+----------------------------------------------------------------
+STEP 4 — Start the app (this is all you do from now on)
+----------------------------------------------------------------
+In Terminal, copy-paste and press Enter:
+       python3 -m streamlit run app.py
+Your web browser will open the app automatically.
+
+----------------------------------------------------------------
+STEP 5 — Log in to ContactOut inside the tool
+----------------------------------------------------------------
+1. Click the "Login (experimental)" tab at the top.
+2. Provider: choose ContactOut.
+3. Type your ContactOut email and password.
+4. CHECK the box "Show the browser window while it works"
+   (recommended — if ContactOut shows a "verify you're human"
+   check, a window pops up and you solve it yourself).
+5. Upload your candidate sheet, click "Enrich candidates",
+   download the workbook.
+
+Your ContactOut login stays on YOUR computer only. It is never
+sent anywhere except ContactOut's own website.
+
+----------------------------------------------------------------
+HONEST NOTES
+----------------------------------------------------------------
+- The login automation is experimental. It was never tested
+  end-to-end because ContactOut blocked our server test. From
+  your home computer it has a real chance, but if ContactOut
+  changes its page layout, the lookup step may need a fix —
+  tell me exactly what you see and I'll fix it.
+- If a "verify you're human" check appears and you can't solve
+  it, stop the run — don't keep retrying or ContactOut may
+  temporarily lock the account.
+- To stop the app: close the browser tab, then in Terminal
+  press Ctrl+C.

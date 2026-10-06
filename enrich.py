@@ -19,6 +19,10 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 SALESQL_BASE = "https://api-public.salesql.com/v1"
 CONTACTOUT_BASE = "https://api.contactout.com"
 
@@ -28,6 +32,7 @@ FREE_EMAIL_DOMAINS = {
     "proton.me", "mail.com", "gmx.com", "zoho.com",
 }
 
+# Common work-email patterns, most common first.
 EMAIL_PATTERNS = [
     "{first}.{last}",
     "{first}{last}",
@@ -49,8 +54,17 @@ class EnrichmentCreditError(Exception):
     """Raised when the account is out of credits / plan blocked (HTTP 402/403)."""
 
 
+# ---------------------------------------------------------------------------
+# API clients
+# ---------------------------------------------------------------------------
+
 class SalesQLClient:
-    """Thin client for the SalesQL public REST API."""
+    """Thin client for the SalesQL public REST API.
+
+    Docs: https://docs.salesql.com/reference/intro-to-the-salesql-api
+    Auth:  Authorization: Bearer <API_KEY>   (key from Settings -> API Access)
+    Plans: API access requires Professional or Premium (Free/Basic excluded).
+    """
 
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -76,6 +90,7 @@ class SalesQLClient:
         company: Optional[str] = None,
         domain: Optional[str] = None,
     ) -> Dict:
+        """GET /persons/enrich. Returns normalized contact dict."""
         params = {}
         if linkedin_url:
             params["linkedin_url"] = linkedin_url
@@ -110,6 +125,9 @@ class SalesQLClient:
             elif "personal" in etype or "private" in etype:
                 personal_emails.append(entry)
             else:
+                # Type not labeled by the tool -> treat as work email for now;
+                # enrich_candidate() re-checks anything whose domain matches
+                # the company domain anyway.
                 work_emails.append(entry)
         return {
             "source": "SalesQL API",
@@ -126,7 +144,14 @@ class SalesQLClient:
 
 
 class ContactOutClient:
-    """Thin client for the ContactOut v1 REST API."""
+    """Thin client for the ContactOut v1 REST API.
+
+    Docs: http://api.contactout.com (official API reference)
+    Auth:  token: <API_TOKEN> header
+    Note:  ContactOut may issue separate work-email and personal-email keys,
+           each with its own credit pool (per third-party integration docs).
+           This client accepts one token; pass the work key for work data.
+    """
 
     def __init__(self, api_token: str):
         self.session = requests.Session()
@@ -144,11 +169,13 @@ class ContactOutClient:
         resp.raise_for_status()
 
     def stats(self) -> Dict:
+        """GET /v1/stats — free endpoint, returns credit usage. Good key check."""
         resp = self.session.get(f"{CONTACTOUT_BASE}/v1/stats", timeout=REQUEST_TIMEOUT)
         self._check(resp, "ContactOut stats")
         return resp.json()
 
     def enrich_linkedin(self, profile_url: str) -> Dict:
+        """GET /v1/people/linkedin/enrich?profile=... — full profile + contacts."""
         resp = self.session.get(
             f"{CONTACTOUT_BASE}/v1/people/linkedin/enrich",
             params={"profile": profile_url},
@@ -158,6 +185,7 @@ class ContactOutClient:
         return self._normalize(resp.json())
 
     def contacts(self, profile_url: str, include_phone: bool = True) -> Dict:
+        """GET /v1/people/linkedin — contacts only (cheaper than full enrich)."""
         resp = self.session.get(
             f"{CONTACTOUT_BASE}/v1/people/linkedin",
             params={
@@ -172,6 +200,8 @@ class ContactOutClient:
 
     @staticmethod
     def _normalize(data: Dict) -> Dict:
+        # ContactOut returns emails as a flat list and phones as a flat list
+        # (per public examples); company domain helps classify work vs personal.
         emails = data.get("emails") or []
         phones = data.get("phones") or []
         company = data.get("current_company") or {}
@@ -201,6 +231,10 @@ class ContactOutClient:
         }
 
 
+# ---------------------------------------------------------------------------
+# Fallback helpers
+# ---------------------------------------------------------------------------
+
 def guess_work_emails(first_name: str, last_name: str, domain: str) -> List[str]:
     """Build common work-email patterns. NEVER presented as verified."""
     first = re.sub(r"[^a-z]", "", (first_name or "").lower())
@@ -219,7 +253,8 @@ def guess_work_emails(first_name: str, last_name: str, domain: str) -> List[str]
 
 
 def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[str]:
-    """Best-effort: fetch the company homepage and look for a name-matching email."""
+    """Best-effort: fetch the company homepage and look for an email address
+    containing the candidate's first or last name. Returns [] on any failure."""
     domain = (domain or "").strip().lower()
     if not domain or "." not in domain:
         return []
@@ -240,6 +275,7 @@ def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[
         for m in set(EMAIL_RE.findall(resp.text)):
             ml = m.lower()
             if (first and first in ml) or (last and last in ml):
+                # skip obvious generic addresses
                 local = ml.split("@")[0]
                 if local not in {"info", "contact", "support", "sales", "hello", "admin"}:
                     found.append(m)
@@ -254,12 +290,21 @@ def clean_domain(value: str) -> str:
     return v
 
 
+# ---------------------------------------------------------------------------
+# Main per-candidate enrichment
+# ---------------------------------------------------------------------------
+
 def enrich_candidate(
     candidate: Dict,
     salesql_key: Optional[str] = None,
     contactout_key: Optional[str] = None,
     polite_delay: float = 0.4,
 ) -> Dict:
+    """Enrich one candidate. Returns a result dict with explicit sources.
+
+    candidate keys: first_name, last_name, company, title, linkedin_url,
+                    company_domain (optional)
+    """
     first = (candidate.get("first_name") or "").strip()
     last = (candidate.get("last_name") or "").strip()
     company = (candidate.get("company") or "").strip()
@@ -276,6 +321,7 @@ def enrich_candidate(
 
     api_hits: List[Dict] = []
 
+    # --- 1) SalesQL ---
     if salesql_key and (linkedin_url or (first and last)):
         try:
             client = SalesQLClient(salesql_key)
@@ -288,10 +334,11 @@ def enrich_candidate(
             )
         except (EnrichmentAuthError, EnrichmentCreditError):
             raise
-        except Exception as exc:
+        except Exception as exc:  # per-candidate failure must not kill the run
             result["notes"].append(f"SalesQL lookup failed: {exc}")
         time.sleep(polite_delay)
 
+    # --- 2) ContactOut (needs a LinkedIn URL) ---
     if contactout_key and linkedin_url:
         try:
             client = ContactOutClient(contactout_key)
@@ -302,6 +349,7 @@ def enrich_candidate(
             result["notes"].append(f"ContactOut lookup failed: {exc}")
         time.sleep(polite_delay)
 
+    # --- 3) Merge: first verified hit wins per field ---
     for hit in api_hits:
         src = hit.get("source", "")
         if not result["work_email"] and hit.get("work_emails"):
@@ -309,6 +357,7 @@ def enrich_candidate(
             result["work_email"] = e["email"]
             result["work_email_source"] = f"{src} (verified by tool)"
         if not result["personal_email"] and hit.get("personal_emails"):
+            # re-classify: if its domain == company domain it is really work mail
             e = hit["personal_emails"][0]
             edom = e["email"].split("@")[-1].lower()
             if domain and edom == domain:
@@ -319,6 +368,7 @@ def enrich_candidate(
                 result["personal_email"] = e["email"]
                 result["personal_email_source"] = f"{src} (verified by tool)"
         if not result["work_phone"] and not result["personal_phone"] and hit.get("phones"):
+            # Tools rarely label work vs personal phones; record as found.
             p = hit["phones"][0]
             result["personal_phone"] = p["phone"]
             result["personal_phone_source"] = f"{src} (type not labeled by tool)"
@@ -326,6 +376,7 @@ def enrich_candidate(
     if not api_hits and (salesql_key or contactout_key):
         result["notes"].append("No API data returned for this candidate.")
 
+    # --- 4) Work-email fallback chain (only if the tools found nothing) ---
     if not result["work_email"]:
         if not domain:
             result["notes"].append(

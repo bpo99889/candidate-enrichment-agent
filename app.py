@@ -278,41 +278,77 @@ with tab_api:
 
 # ----------------------------------------------------------------- Login tab
 with tab_login:
-    st.error("**EXPERIMENTAL** — a headless browser signs in to the vendor's "
-             "website with YOUR credentials. It can break on bot "
-             "checks/CAPTCHAs, can't handle Google/LinkedIn OAuth-only "
-             "accounts, and automating logins may violate the vendor's Terms "
+    st.caption("Login helper v2 — automatic and manual sign-in supported.")
+    st.error("**EXPERIMENTAL** — a browser signs in to the vendor's "
+             "website. ContactOut always shows a 'verify you're human' "
+             "checkbox that only a person can click, so **manual sign-in is "
+             "recommended**. Automating logins may violate the vendor's Terms "
              "of Service or risk your account being banned. Try a small test "
              "run first.")
     if not _LOGIN_MODE_SUPPORTED:
         st.error("Login mode needs the Playwright browser package, which is "
                  "not installed on this server.")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
         login_provider = st.selectbox("Provider", ["SalesQL", "ContactOut"],
                                       key="login_prov")
     with c2:
-        login_user = st.text_input("Email / username", key="login_user") or None
-    with c3:
-        login_pass = st.text_input("Password", type="password",
-                                   key="login_pass") or None
-    st.caption("Credentials stay in this browser session only — never stored, "
-               "never logged, never written to disk.")
+        login_how = st.radio(
+            "How to sign in",
+            ["I'll sign in myself in the browser window (recommended)",
+             "Type my email + password, app signs in"],
+            key="login_how")
+    manual_mode = login_how.startswith("I'll sign in myself")
+    if manual_mode:
+        st.info("When you click **Enrich candidates**, a browser window opens "
+                "on the provider's login page. Sign in yourself — including "
+                "the 'verify you're human' checkbox — and the app continues "
+                "automatically once you're signed in. Your credentials never "
+                "touch this app.")
+        login_user = login_pass = None
+        show_browser = True
+    else:
+        c3, c4 = st.columns(2)
+        with c3:
+            login_user = st.text_input("Email / username",
+                                       key="login_user") or None
+        with c4:
+            login_pass = st.text_input("Password", type="password",
+                                       key="login_pass") or None
+        st.caption("Credentials stay in this browser session only — never stored, "
+                   "never logged, never written to disk.")
+        show_browser = st.checkbox(
+            "Show the browser window while it works",
+            help="If the provider shows a 'verify you're human' check, you can "
+                 "solve it yourself in the visible window. Recommended when "
+                 "running on your own computer.",
+            key="login_show")
 
     login_candidates = upload_block("login")
-    can_login = (bool(login_candidates) and bool(login_user) and bool(login_pass)
-                 and _LOGIN_MODE_SUPPORTED and _be is not None)
-    if login_candidates and not (login_user and login_pass):
-        st.warning("Enter your provider username and password to run.")
-    run_enrichment(
-        "login", login_candidates,
-        lambda: _be.login_enrich_list(
+    if manual_mode:
+        can_login = (bool(login_candidates) and _LOGIN_MODE_SUPPORTED
+                     and _be is not None)
+        make_iter = lambda: _be.manual_login_enrich_list(
+            login_candidates,
+            provider=(login_provider or "ContactOut").lower())
+        note = ("A browser window will open — sign in yourself (including "
+                "the 'verify you're human' checkbox). The run continues "
+                "automatically once you're signed in.")
+    else:
+        can_login = (bool(login_candidates) and bool(login_user)
+                     and bool(login_pass) and _LOGIN_MODE_SUPPORTED
+                     and _be is not None)
+        make_iter = lambda: _be.login_enrich_list(
             login_candidates,
             provider=(login_provider or "SalesQL").lower(),
-            username=login_user, password=login_pass),
-        note="Login mode is experimental: a headless browser will sign in "
-             "now. This is slow and may be blocked.",
-        can_run=can_login)
+            username=login_user, password=login_pass,
+            headless=not show_browser)
+        note = ("Login mode is experimental: a browser will sign in "
+                "now. This is slow and may be blocked.")
+    if login_candidates and not manual_mode and not (login_user and login_pass):
+        st.warning("Enter your provider username and password to run.")
+    run_enrichment("login", login_candidates, make_iter, note=note,
+                   can_run=can_login)
     download_block("login")
 
 # ---------------------------------------------------------------------------
