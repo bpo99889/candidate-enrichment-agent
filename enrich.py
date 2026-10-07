@@ -17,6 +17,7 @@ Anything we could not confirm is marked in README.txt, not silently assumed.
 import re
 import time
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -332,6 +333,87 @@ class HunterClient:
                 "emails": [e.get("value") for e in emails if e.get("value")]}
 
 
+def _search_company_domains(company: str, limit: int = 3) -> List[str]:
+    """Free web search (DuckDuckGo, no key) for a company's official website.
+    Returns up to `limit` distinct domains, best first. [] on any failure."""
+    company = (company or "").strip()
+    if not company:
+        return []
+    try:
+        r = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": f"{company} official website"},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=15)
+        if r.status_code != 200 or not r.text:
+            return []
+        urls = re.findall(r'href="//duckduckgo\.com/l/\?uddg=([^"&]+)', r.text)
+        skip = ("linkedin.com", "facebook.com", "instagram.com", "twitter.com",
+                "x.com", "youtube.com", "wikipedia.org", "crunchbase.com",
+                "bloomberg.com", "zoominfo.com", "glassdoor.com", "indeed.com")
+        seen: List[str] = []
+        for u in urls:
+            try:
+                netloc = urlparse(unquote(u)).netloc.lower()
+            except Exception:
+                continue
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            if not netloc or "." not in netloc or netloc in seen:
+                continue
+            if any(b in netloc for b in skip):
+                continue
+            seen.append(netloc)
+            if len(seen) >= limit:
+                break
+        return seen
+    except Exception:
+        return []
+
+
+def discover_domain(company: str, hunter_key: Optional[str] = None,
+                    cache: Optional[Dict[str, str]] = None) -> str:
+    """Find a company's REAL email domain when the sheet has none.
+
+    1) Free web search for the official website (no credits).
+    2) Ask Hunter which candidate domain actually has email data
+       (1 search credit per domain checked, stops at the first hit).
+    3) Fall back to the top search result, then to the name-guess.
+    Results are cached per company for the run. Returns "" if nothing found.
+    """
+    if cache is None:
+        cache = {}
+    key = (company or "").strip().lower()
+    if key in cache:
+        return cache[key]
+    domain = ""
+    candidates = _search_company_domains(company)
+    if hunter_key and candidates:
+        try:
+            hc = HunterClient(hunter_key)
+            for d in candidates[:2]:  # check top 2 only, save credits
+                try:
+                    ds = hc.domain_search(d)
+                    time.sleep(0.4)
+                    if ds and (ds.get("emails") or ds.get("pattern")):
+                        domain = d
+                        break
+                except (EnrichmentAuthError, EnrichmentCreditError):
+                    raise
+                except Exception:
+                    continue
+        except (EnrichmentAuthError, EnrichmentCreditError):
+            raise
+        except Exception:
+            pass
+    if not domain and candidates:
+        domain = candidates[0]
+    if not domain:
+        domain = derive_domain(company)
+    cache[key] = domain
+    return domain
+
+
 def domain_has_mx(domain: str) -> bool:
     """Free DNS check: does this domain have mail servers? Used to avoid
     building emails on a wrong/guessed domain. Fail-open: if the DNS check
@@ -611,6 +693,7 @@ def enrich_candidate(
     hunter_key: Optional[str] = None,
     lusha_key: Optional[str] = None,
     polite_delay: float = 0.4,
+    _domain_cache: Optional[Dict[str, str]] = None,
 ) -> Dict:
     """Enrich one candidate. Returns a result dict with explicit sources.
 
@@ -622,13 +705,30 @@ def enrich_candidate(
     company = (candidate.get("company") or "").strip()
     linkedin_url = (candidate.get("linkedin_url") or "").strip()
     domain = clean_domain(candidate.get("company_domain") or "")
+    domain_from_sheet = bool(domain)
+    if not domain and company:
+        # No website in the sheet: find the company's real domain
+        # automatically (web search + Hunter validation) instead of guessing
+        # it from the company name.
+        try:
+            domain = discover_domain(company, hunter_key, _domain_cache)
+        except (EnrichmentAuthError, EnrichmentCreditError):
+            raise
+        except Exception:
+            domain = derive_domain(company)
+        if domain:
+            result_notes = [f"Company website auto-found: {domain}"]
+        else:
+            result_notes = []
+    else:
+        result_notes = []
 
     result = {
         "personal_email": "", "personal_email_source": "",
         "personal_phone": "", "personal_phone_source": "",
         "work_email": "", "work_email_source": "",
         "work_phone": "", "work_phone_source": "",
-        "notes": [],
+        "notes": result_notes,
     }
 
     api_hits: List[Dict] = []
@@ -720,7 +820,7 @@ def enrich_candidate(
     # Runs only if the tools above found no work email yet, to save credits.
     # Free plan: 25 searches + 50 verifications/month.
     if hunter_key and not result["work_email"] and first and last:
-        hdomain = domain or derive_domain(company)
+        hdomain = domain
         if not hdomain:
             result["notes"].append(
                 "Hunter.io skipped: no company domain (add a Website/Domain "
@@ -779,7 +879,7 @@ def enrich_candidate(
     need_email = not result["work_email"]
     need_phone = not result["work_phone"] and not result["personal_phone"]
     if lusha_key and first and last and (need_email or need_phone):
-        hdomain = domain or derive_domain(company)
+        hdomain = domain
         try:
             lclient = LushaClient(lusha_key)
             reveal = []
@@ -850,17 +950,17 @@ def enrich_candidate(
     # the company's real pattern) -> blind pattern guess from the domain.
     # Everything here is UNVERIFIED and labeled as such.
     if not result["work_email"]:
-        fbdomain = domain or derive_domain(company)
+        fbdomain = domain
         if not fbdomain:
             result["notes"].append(
                 "Work email not found via tools; company domain unknown so "
                 "pattern/website fallback was skipped."
             )
         else:
-            if not domain:
+            if not domain_from_sheet:
                 result["notes"].append(
-                    f"Company domain '{fbdomain}' was derived from the company "
-                    f"name — confirm it is correct.")
+                    f"Company domain '{fbdomain}' was auto-discovered — "
+                    f"confirm it is correct.")
             website_hits = find_email_on_website(fbdomain, first, last)
             if website_hits:
                 result["work_email"] = website_hits[0]
@@ -957,6 +1057,8 @@ def enrich_candidate(
 def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
                 hunter_key=None, lusha_key=None):
     """Generator yielding (index, candidate, result) for progress display."""
+    _domain_cache: Dict[str, str] = {}
     for i, cand in enumerate(candidates):
         yield i, cand, enrich_candidate(cand, salesql_key, contactout_key,
-                                        hunter_key, lusha_key)
+                                        hunter_key, lusha_key,
+                                        _domain_cache=_domain_cache)
