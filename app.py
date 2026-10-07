@@ -44,7 +44,7 @@ _LOGIN_ERRORS = tuple(
     ] if isinstance(c, type) and issubclass(c, Exception)
 )
 
-st.set_page_config(page_title="Candidate Enrichment Agent", layout="wide")
+st.set_page_config(page_title="BPO WIZARD", layout="wide")
 
 # ---------------------------------------------------------------------------
 # Column mapping helpers
@@ -313,7 +313,7 @@ def download_block(key: str):
 # Page
 # ---------------------------------------------------------------------------
 
-st.title("🔍 Candidate Enrichment Agent")
+st.title("🧙 BPO WIZARD")
 st.caption("Enrich candidate lists with contact details, then download a "
            "3-sheet Excel workbook.")
 
