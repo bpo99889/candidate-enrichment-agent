@@ -357,19 +357,6 @@ with tab_api:
             "ContactOut API token", type="password", key="api_co",
             help="ContactOut dashboard → API. Needs a paid plan.",
         ) or None
-    c3, c4 = st.columns(2)
-    with c3:
-        hunter_key = st.text_input(
-            "Hunter.io API key", type="password", key="api_hunter",
-            help="hunter.io → Dashboard → API. Free plan: 25 searches + 50 verifications/month, no card. Finds WORK emails only.",
-        ) or None
-    with c4:
-        lusha_key = st.text_input(
-            "Lusha API key", type="password", key="api_lusha",
-            help="dashboard.lusha.com → API & Integrations. Free plan: ~40 credits/month, no card. Finds work emails AND phone numbers (1 credit/email, ~5/phone).",
-        ) or None
-    t1, t2, t3 = st.columns(3)
-    with t1:
         if st.button("Test ContactOut key (free, no credits spent)", key="api_test"):
             if not contactout_key:
                 st.error("Paste your ContactOut token first.")
@@ -382,7 +369,12 @@ with tab_api:
                     st.error(str(e))
                 except Exception as e:
                     st.error(f"Key check failed: {e}")
-    with t2:
+    c3, c4 = st.columns(2)
+    with c3:
+        hunter_key = st.text_input(
+            "Hunter.io API key", type="password", key="api_hunter",
+            help="hunter.io → Dashboard → API. Free plan: 25 searches + 50 verifications/month, no card. Finds WORK emails only.",
+        ) or None
         if st.button("Test Hunter.io key (free)", key="api_test_hunter"):
             if not hunter_key:
                 st.error("Paste your Hunter.io API key first.")
@@ -400,7 +392,11 @@ with tab_api:
                     st.error(str(e))
                 except Exception as e:
                     st.error(f"Key check failed: {e}")
-    with t3:
+    with c4:
+        lusha_key = st.text_input(
+            "Lusha API key", type="password", key="api_lusha",
+            help="dashboard.lusha.com → API & Integrations. Free plan: ~40 credits/month, no card. Finds work emails AND phone numbers (1 credit/email, ~5/phone).",
+        ) or None
         if st.button("Test Lusha key (free)", key="api_test_lusha"):
             if not lusha_key:
                 st.error("Paste your Lusha API key first.")
