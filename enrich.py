@@ -333,42 +333,81 @@ class HunterClient:
                 "emails": [e.get("value") for e in emails if e.get("value")]}
 
 
+def _ddg_domains(query: str, limit: int = 3) -> List[str]:
+    """One DuckDuckGo HTML search, returning distinct domains."""
+    r = requests.get(
+        "https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        timeout=15)
+    if r.status_code != 200 or not r.text:
+        return []
+    urls = re.findall(r'href="//duckduckgo\.com/l/\?uddg=([^"&]+)', r.text)
+    return _clean_domains(urls, limit)
+
+
+def _bing_domains(query: str, limit: int = 3) -> List[str]:
+    """One Bing HTML search (backup when DuckDuckGo flakes), same shape."""
+    r = requests.get(
+        "https://www.bing.com/search",
+        params={"q": query, "format": "rss"},
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        timeout=15)
+    if r.status_code != 200 or not r.text:
+        return []
+    urls = re.findall(r"<link>(https?://[^<]+)</link>", r.text)
+    return _clean_domains(urls, limit, unquote_url=False)
+
+
+def _clean_domains(urls: List[str], limit: int,
+                   unquote_url: bool = True) -> List[str]:
+    skip = ("linkedin.com", "facebook.com", "instagram.com", "twitter.com",
+            "x.com", "youtube.com", "wikipedia.org", "crunchbase.com",
+            "bloomberg.com", "zoominfo.com", "glassdoor.com", "indeed.com")
+    seen: List[str] = []
+    for u in urls:
+        try:
+            raw = unquote(u) if unquote_url else u
+            netloc = urlparse(raw).netloc.lower().split(":")[0]
+        except Exception:
+            continue
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        if not netloc or "." not in netloc or netloc in seen:
+            continue
+        if any(b in netloc for b in skip):
+            continue
+        seen.append(netloc)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
 def _search_company_domains(company: str, limit: int = 3) -> List[str]:
-    """Free web search (DuckDuckGo, no key) for a company's official website.
-    Returns up to `limit` distinct domains, best first. [] on any failure."""
+    """Free web search (no key) for a company's official website.
+
+    Retries DuckDuckGo (it flakes), then tries Bing as backup.
+    Returns up to `limit` distinct domains, best first. [] on total failure.
+    """
     company = (company or "").strip()
     if not company:
         return []
+    query = f"{company} official website"
+    for attempt in range(3):
+        try:
+            found = _ddg_domains(query, limit)
+            if found:
+                return found
+        except Exception:
+            pass
+        time.sleep(1.5 * (attempt + 1))
     try:
-        r = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": f"{company} official website"},
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=15)
-        if r.status_code != 200 or not r.text:
-            return []
-        urls = re.findall(r'href="//duckduckgo\.com/l/\?uddg=([^"&]+)', r.text)
-        skip = ("linkedin.com", "facebook.com", "instagram.com", "twitter.com",
-                "x.com", "youtube.com", "wikipedia.org", "crunchbase.com",
-                "bloomberg.com", "zoominfo.com", "glassdoor.com", "indeed.com")
-        seen: List[str] = []
-        for u in urls:
-            try:
-                netloc = urlparse(unquote(u)).netloc.lower()
-            except Exception:
-                continue
-            if netloc.startswith("www."):
-                netloc = netloc[4:]
-            if not netloc or "." not in netloc or netloc in seen:
-                continue
-            if any(b in netloc for b in skip):
-                continue
-            seen.append(netloc)
-            if len(seen) >= limit:
-                break
-        return seen
+        found = _bing_domains(query, limit)
+        if found:
+            return found
     except Exception:
-        return []
+        pass
+    return []
 
 
 def discover_domain(company: str, hunter_key: Optional[str] = None,
