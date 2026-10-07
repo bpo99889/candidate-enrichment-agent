@@ -213,14 +213,9 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
         "work_phone": (["work phone", "work direct phone", "direct phone",
                         "office phone"], "Work Phone"),
     }
-    # Separate column for unverified work emails — added only when needed.
-    need_possible = any(
-        (r.get("work_email") or "") and
-        not _is_tool_email(r.get("work_email_source"))
-        for _c, r in enriched_rows
-    )
-    if need_possible:
-        targets["possible_work_email"] = ([], "Possible Work Email")
+    # Separate column for unverified work emails — always added so the
+    # user can see where unverified emails land (stays empty if none).
+    targets["possible_work_email"] = ([], "Possible Work Email")
     colmap = {}
     for field, (aliases, new_name) in targets.items():
         idx = next((norm[a] for a in aliases if a in norm), None)
