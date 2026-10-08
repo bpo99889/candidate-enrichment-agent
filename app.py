@@ -473,7 +473,14 @@ with tab_api:
                 try:
                     from enrich import ReoonClient
                     info = ReoonClient(reoon_key).account_info()
-                    st.success(f"Key works. Account info: {info}")
+                    ud = info.get("user_data", {}) or {}
+                    daily_rem = ud.get("credits_daily_remaining", "?")
+                    daily_lim = ud.get("credits_daily_limit", "?")
+                    life_rem = ud.get("credits_lifetime_remaining", "?")
+                    st.success(
+                        f"Key works. Status: {info.get('api_status', '?')} | "
+                        f"Daily: {daily_rem}/{daily_lim} left | "
+                        f"Lifetime: {life_rem} left")
                 except EnrichmentAuthError as e:
                     st.error(str(e))
                 except Exception as e:
