@@ -528,7 +528,7 @@ with tab_api:
 
     # --- Reoon bounce check (after enrichment) ---
     enriched = st.session_state.get("api_enriched", [])
-    reoon_key_ss = st.session_state.get("api_reoon") or None
+    reoon_key_ss = (st.session_state.get("api_reoon") or "").strip() or None
     if enriched and reoon_key_ss:
         # Count how many have work emails to verify
         to_verify = sum(1 for _c, _r in enriched if (_r.get("work_email") or "").strip())
