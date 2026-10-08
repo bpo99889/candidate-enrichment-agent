@@ -186,11 +186,22 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     from openpyxl.styles import PatternFill
 
     PINK_FILL = PatternFill("solid", fgColor="FFC7CE")
+    RED_FILL = PatternFill("solid", fgColor="FF0000")
+    GREEN_FILL = PatternFill("solid", fgColor="00B050")
 
     def _is_tool_email(source: str) -> bool:
         s = (source or "").lower()
         return any(t in s for t in ("hunter.io", "salesql", "contactout",
-                                    "lusha"))
+                                    "lusha", "fullenrich"))
+
+    def _reoon_fill(status: str):
+        """Red for invalid, green for everything else."""
+        s = (status or "").lower()
+        if not s:
+            return None
+        if s == "invalid":
+            return RED_FILL
+        return GREEN_FILL
 
     bio = io.BytesIO(file_bytes)
     if filename.lower().endswith(".csv"):
@@ -216,6 +227,9 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     # Separate column for unverified work emails — always added so the
     # user can see where unverified emails land (stays empty if none).
     targets["possible_work_email"] = ([], "Possible Work Email")
+    # Reoon bounce-check status — always added so the user can see
+    # verification results (stays empty if not checked).
+    targets["reoon_status"] = ([], "Email Status (Reoon)")
     # Notes column: explains what happened for each candidate (domain found,
     # fallbacks tried, why emails were dropped). Always added.
     targets["notes"] = ([], "Enrichment Notes")
@@ -247,6 +261,7 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
             "personal_phone": res.get("personal_phone") or "",
             "work_phone": res.get("work_phone") or "",
             "notes": res.get("notes") or "",
+            "reoon_status": res.get("reoon_status") or "",
         }
         for field, cidx in colmap.items():
             if not vals[field]:
@@ -256,6 +271,15 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
                 cell.value = vals[field]
                 if field == "possible_work_email":
                     cell.fill = PINK_FILL
+                elif field == "reoon_status":
+                    fill = _reoon_fill(vals[field])
+                    if fill:
+                        cell.fill = fill
+                elif field == "work_email":
+                    # Also highlight the work email cell itself based on Reoon
+                    fill = _reoon_fill(res.get("reoon_status"))
+                    if fill:
+                        cell.fill = fill
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -436,7 +460,22 @@ with tab_api:
                 except Exception as e:
                     st.error(f"Key check failed: {e}")
     with c6:
-        st.empty()  # spacer
+        reoon_key = st.text_input(
+            "Reoon API key", type="password", key="api_reoon",
+            help="emailverifier.reoon.com → dashboard. Free: ~20/day, 600/month, no card. Verifies emails for bounces (Power mode).",
+        ) or None
+        if st.button("Test Reoon key (free)", key="api_test_reoon"):
+            if not reoon_key:
+                st.error("Paste your Reoon API key first.")
+            else:
+                try:
+                    from enrich import ReoonClient
+                    info = ReoonClient(reoon_key).account_info()
+                    st.success(f"Key works. Account info: {info}")
+                except EnrichmentAuthError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Key check failed: {e}")
 
     api_candidates = upload_block("api")
     can_run = bool(api_candidates) and (salesql_key or contactout_key or hunter_key
@@ -477,6 +516,30 @@ with tab_api:
                                        fullenrich_key=fullenrich_key,
                                        sheet_type=sheet_code),
                    can_run=can_run)
+
+    # --- Reoon bounce check (after enrichment) ---
+    enriched = st.session_state.get("api_enriched", [])
+    if enriched and reoon_key:
+        if st.button("Check for bounces (Reoon Power mode)", key="api_reoon_check"):
+            from enrich import verify_emails_with_reoon
+            with st.spinner("Verifying emails with Reoon (Power mode)..."):
+                try:
+                    for idx, email, status in verify_emails_with_reoon(
+                            enriched, reoon_key, mode="power"):
+                        pass  # statuses are written into rows in place
+                    st.session_state["api_enriched"] = enriched
+                    st.success("Bounce check complete. Download your sheet below — "
+                               "invalid emails are red, others green.")
+                    st.rerun()
+                except EnrichmentAuthError as e:
+                    st.error(str(e))
+                except EnrichmentCreditError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Bounce check failed: {e}")
+    elif enriched and not reoon_key:
+        st.caption("Paste a Reoon API key above to check for bounces.")
+
     download_block("api")
 
 # ----------------------------------------------------------------- Login tab

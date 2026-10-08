@@ -849,6 +849,59 @@ class FullEnrichClient:
         return out
 
 
+REOON_BASE = "https://emailverifier.reoon.com/api/v1"
+
+
+class ReoonClient:
+    """Thin client for Reoon Email Verifier API v1.
+
+    Docs: https://www.reoon.com/articles/api-documentation-of-reoon-email-verifier/
+    Auth:  API key as `key` query param (from emailverifier.reoon.com dashboard).
+    Free tier: ~20 credits/day, up to 600/month, no card.
+    Modes: `quick` (~0.5s, syntax/MX/disposable) or `power` (deep SMTP,
+    inbox existence, catch-all detection — slower but most accurate).
+    Statuses: safe, invalid, disabled, disposable, inbox_full, catch_all,
+    role_account, spamtrap, unknown.
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.session = requests.Session()
+
+    def _check(self, resp: requests.Response, action: str):
+        if resp.status_code == 401:
+            raise EnrichmentAuthError(
+                "Reoon rejected the API key (401). Check the key.")
+        if resp.status_code == 402:
+            raise EnrichmentCreditError(
+                "Reoon: out of credits (402). Free tier resets daily/monthly.")
+        if resp.status_code == 429:
+            raise RuntimeError(
+                "Reoon rate limit hit (429). Slow down and retry.")
+        resp.raise_for_status()
+
+    def account_info(self) -> Dict:
+        """GET /get-account-info — credit balance. Free, no credits spent."""
+        resp = self.session.get(
+            f"{REOON_BASE}/get-account-info",
+            params={"key": self.api_key}, timeout=REQUEST_TIMEOUT)
+        self._check(resp, "Reoon account info")
+        return resp.json()
+
+    def verify(self, email: str, mode: str = "power") -> Dict:
+        """GET /verify — verify a single email.
+
+        mode: "quick" or "power" (default power for deepest check).
+        Returns the raw JSON: status, overall_score, is_safe_to_send, etc.
+        """
+        resp = self.session.get(
+            f"{REOON_BASE}/verify",
+            params={"email": email, "key": self.api_key, "mode": mode},
+            timeout=60)  # power mode can take a few seconds
+        self._check(resp, "Reoon verify")
+        return resp.json()
+
+
 def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[str]:
     """Best-effort: fetch the company homepage AND common team/contact pages
     (where companies often list employee emails) and look for an email
@@ -1359,3 +1412,28 @@ def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
                                         fullenrich_key=fullenrich_key,
                                         _domain_cache=_domain_cache,
                                         sheet_type=sheet_type)
+
+
+def verify_emails_with_reoon(enriched_rows: List[Dict], reoon_key: str,
+                             mode: str = "power"):
+    """Generator yielding (index, email, reoon_status) for bounce checking.
+
+    Verifies each result's work email via Reoon. Yields (index, email, status)
+    where status is Reoon's verdict: safe, invalid, catch_all, unknown, etc.
+    Updates each row's dict in place with `reoon_status`.
+    Only verifies rows that have a work email.
+    """
+    client = ReoonClient(reoon_key)
+    for i, row in enumerate(enriched_rows):
+        email = (row.get("work_email") or "").strip()
+        if not email:
+            continue
+        try:
+            resp = client.verify(email, mode=mode)
+            status = resp.get("status", "unknown")
+        except (EnrichmentAuthError, EnrichmentCreditError):
+            raise
+        except Exception as exc:
+            status = f"error: {exc}"
+        row["reoon_status"] = status
+        yield i, email, status
