@@ -528,13 +528,14 @@ with tab_api:
 
     # --- Reoon bounce check (after enrichment) ---
     enriched = st.session_state.get("api_enriched", [])
-    if enriched and reoon_key:
+    reoon_key_ss = st.session_state.get("api_reoon") or None
+    if enriched and reoon_key_ss:
         if st.button("Check for bounces (Reoon Power mode)", key="api_reoon_check"):
             from enrich import verify_emails_with_reoon
             with st.spinner("Verifying emails with Reoon (Power mode)..."):
                 try:
                     for idx, email, status in verify_emails_with_reoon(
-                            enriched, reoon_key, mode="power"):
+                            enriched, reoon_key_ss, mode="power"):
                         pass  # statuses are written into rows in place
                     st.session_state["api_enriched"] = enriched
                     st.success("Bounce check complete. Download your sheet below — "
@@ -546,7 +547,7 @@ with tab_api:
                     st.error(str(e))
                 except Exception as e:
                     st.error(f"Bounce check failed: {e}")
-    elif enriched and not reoon_key:
+    elif enriched and not reoon_key_ss:
         st.caption("Paste a Reoon API key above to check for bounces.")
 
     download_block("api")
