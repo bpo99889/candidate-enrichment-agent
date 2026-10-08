@@ -1414,18 +1414,20 @@ def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
                                         sheet_type=sheet_type)
 
 
-def verify_emails_with_reoon(enriched_rows: List[Dict], reoon_key: str,
+def verify_emails_with_reoon(enriched_rows, reoon_key: str,
                              mode: str = "power"):
     """Generator yielding (index, email, reoon_status) for bounce checking.
 
     Verifies each result's work email via Reoon. Yields (index, email, status)
     where status is Reoon's verdict: safe, invalid, catch_all, unknown, etc.
-    Updates each row's dict in place with `reoon_status`.
+    Updates each row's result dict in place with `reoon_status`.
     Only verifies rows that have a work email.
+
+    enriched_rows: list of (candidate_dict, result_dict) tuples.
     """
     client = ReoonClient(reoon_key)
-    for i, row in enumerate(enriched_rows):
-        email = (row.get("work_email") or "").strip()
+    for i, (cand, res) in enumerate(enriched_rows):
+        email = (res.get("work_email") or "").strip()
         if not email:
             continue
         try:
@@ -1435,5 +1437,5 @@ def verify_emails_with_reoon(enriched_rows: List[Dict], reoon_key: str,
             raise
         except Exception as exc:
             status = f"error: {exc}"
-        row["reoon_status"] = status
+        res["reoon_status"] = status
         yield i, email, status
