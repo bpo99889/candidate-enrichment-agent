@@ -1101,9 +1101,15 @@ def enrich_candidate(
     # and phone numbers. Free plan: 50 credits, no card. Costs: work email 1,
     # personal email 3, phone 10. No result = 0 credits.
     # Only asks for what's still missing.
+    # PROFESSIONAL sheets: spend credits on work email + work phone only.
+    # Personal details are added only if they come back free with the lookup
+    # (never spend credits just for personal data on Professional).
     need_fe_work = not result["work_email"]
     need_fe_pers = not result["personal_email"]
     need_fe_phone = not result["personal_phone"] and not result["work_phone"]
+    # On Professional, don't PAY for personal emails (3 credits each).
+    # We still parse them from the response if they come back free.
+    fe_want_pers = need_fe_pers and sheet_type != "professional"
     if fullenrich_key and (need_fe_work or need_fe_pers or need_fe_phone) \
             and first and last:
         try:
@@ -1115,7 +1121,7 @@ def enrich_candidate(
                 company_name=company,
                 linkedin_url=linkedin_url,
                 want_work_email=need_fe_work,
-                want_personal_email=need_fe_pers,
+                want_personal_email=fe_want_pers,
                 want_phone=need_fe_phone,
             )
             if fe_result.get("_status"):
@@ -1136,7 +1142,9 @@ def enrich_candidate(
                         f"FullEnrich found work email: {fe_work} "
                         f"(status: {fe_status or 'unknown'}).")
                 fe_pers = fe_result.get("personal_email", "")
-                if need_fe_pers and fe_pers:
+                # Add personal email if present — even on Professional where
+                # we didn't pay for it, keep it if it came back free.
+                if fe_pers and not result["personal_email"]:
                     result["personal_email"] = fe_pers
                     result["notes"].append(
                         f"FullEnrich found personal email: {fe_pers}.")
