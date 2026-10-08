@@ -530,23 +530,33 @@ with tab_api:
     enriched = st.session_state.get("api_enriched", [])
     reoon_key_ss = st.session_state.get("api_reoon") or None
     if enriched and reoon_key_ss:
-        if st.button("Check for bounces (Reoon Power mode)", key="api_reoon_check"):
+        # Count how many have work emails to verify
+        to_verify = sum(1 for _c, _r in enriched if (_r.get("work_email") or "").strip())
+        if st.button(f"Check for bounces — {to_verify} emails (Reoon Power mode)",
+                     key="api_reoon_check"):
             from enrich import verify_emails_with_reoon
-            with st.spinner("Verifying emails with Reoon (Power mode)..."):
-                try:
-                    for idx, email, status in verify_emails_with_reoon(
-                            enriched, reoon_key_ss, mode="power"):
-                        pass  # statuses are written into rows in place
-                    st.session_state["api_enriched"] = enriched
-                    st.success("Bounce check complete. Download your sheet below — "
-                               "invalid emails are red, others green.")
-                    st.rerun()
-                except EnrichmentAuthError as e:
-                    st.error(str(e))
-                except EnrichmentCreditError as e:
-                    st.error(str(e))
-                except Exception as e:
-                    st.error(f"Bounce check failed: {e}")
+            progress = st.progress(0, text="Starting Reoon verification…")
+            try:
+                done = 0
+                for idx, email, status in verify_emails_with_reoon(
+                        enriched, reoon_key_ss, mode="power"):
+                    done += 1
+                    progress.progress(done / max(to_verify, 1),
+                                     text=f"Verified {done}/{to_verify}: {email} → {status}")
+                st.session_state["api_enriched"] = enriched
+                progress.empty()
+                st.success(f"Bounce check complete — {done} emails verified. "
+                           "Download your sheet below: invalid=red, others=green, safe=plain.")
+                st.rerun()
+            except EnrichmentAuthError as e:
+                progress.empty()
+                st.error(str(e))
+            except EnrichmentCreditError as e:
+                progress.empty()
+                st.error(str(e))
+            except Exception as e:
+                progress.empty()
+                st.error(f"Bounce check failed: {e}")
     elif enriched and not reoon_key_ss:
         st.caption("Paste a Reoon API key above to check for bounces.")
 
