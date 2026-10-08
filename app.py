@@ -568,3 +568,19 @@ with st.expander("⚠️ Honest limits — read before relying on results"):
         "highlighted amber in the workbook. Verify before sending.\n"
         "- **Coverage is never 100%.** Blank cells mean 'not found', not 'does not exist'."
     )
+
+# ---------------------------------------------------------------------------
+# How enrichment works (footer)
+# ---------------------------------------------------------------------------
+st.markdown("---")
+with st.expander("⚙️ How BPO WIZARD enriches each candidate (in order)"):
+    st.markdown(
+        "1. **SalesQL** — work email + personal email + direct phone numbers\n"
+        "2. **ContactOut** — fills whatever's still missing (all numbers → personal/mobile)\n"
+        "3. **Hunter.io** — work email finder + verifier (skipped on Personal sheets to save credits)\n"
+        "4. **FullEnrich** — work emails Hunter missed + personal emails + phone numbers (only what's still missing)\n"
+        "5. **Lusha** — last resort for anything still empty\n"
+        "6. **Free fallbacks** — company website scan, Hunter directory, pattern guess (all marked UNVERIFIED in Possible Work Email)\n"
+        "\n"
+        "Each step only runs if the previous ones left gaps, so you don't waste credits."
+    )
