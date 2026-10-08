@@ -683,9 +683,177 @@ def guess_work_emails(first_name: str, last_name: str, domain: str) -> List[str]
     return out
 
 
+FULLENRICH_BASE = "https://app.fullenrich.com/api/v1"
+
+
+class FullEnrichClient:
+    """Thin client for FullEnrich's Contact Enrichment API v1.
+
+    Docs: https://docs.fullenrich.com (official v1 reference)
+    Auth:  Authorization: Bearer <api_key> (from app.fullenrich.com/app/settings/api).
+    Free plan: 50 credits, no card. Credit costs: work email 1, personal
+    email 3, mobile phone 10. No result found = 0 credits (not charged).
+    The bulk endpoint is async: POST returns an enrichment_id, then poll
+    GET /contact/enrich/bulk/{id} until status is FINISHED.
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.session = requests.Session()
+        self.session.headers.update({"Authorization": f"Bearer {api_key}"})
+
+    def _check(self, resp: requests.Response, action: str):
+        if resp.status_code == 401:
+            raise EnrichmentAuthError(
+                "FullEnrich rejected the API key (401). Check the key.")
+        if resp.status_code == 402:
+            raise EnrichmentCreditError(
+                "FullEnrich: out of credits (402).")
+        if resp.status_code == 429:
+            raise RuntimeError(
+                "FullEnrich rate limit hit (429). Slow down and retry.")
+        resp.raise_for_status()
+
+    def verify(self) -> Dict:
+        """GET /account/keys/verify — confirms the key is valid. Free."""
+        resp = self.session.get(
+            f"{FULLENRICH_BASE}/account/keys/verify", timeout=REQUEST_TIMEOUT)
+        self._check(resp, "FullEnrich verify")
+        return resp.json()
+
+    def credits(self) -> Dict:
+        """GET /account/credits — credit balance. Free, no credits spent."""
+        resp = self.session.get(
+            f"{FULLENRICH_BASE}/account/credits", timeout=REQUEST_TIMEOUT)
+        self._check(resp, "FullEnrich credits")
+        return resp.json()
+
+    def enrich_one(self, first_name: str, last_name: str,
+                   domain: str = "", company_name: str = "",
+                   linkedin_url: str = "",
+                   want_work_email: bool = True,
+                   want_personal_email: bool = False,
+                   want_phone: bool = False,
+                   poll_timeout: int = 120) -> Dict:
+        """Enrich a single contact via bulk endpoint + polling.
+
+        Returns normalized dict with keys: work_email, work_email_status,
+        personal_email, phones (list). Empty dict if no result.
+        """
+        enrich_fields = []
+        if want_work_email:
+            enrich_fields.append("contact.work_emails")
+        if want_personal_email:
+            enrich_fields.append("contact.personal_emails")
+        if want_phone:
+            enrich_fields.append("contact.phones")
+        if not enrich_fields:
+            return {}
+
+        contact: Dict[str, Any] = {
+            "firstname": first_name,
+            "lastname": last_name,
+            "enrich_fields": enrich_fields,
+        }
+        if domain:
+            contact["domain"] = domain
+        if company_name:
+            contact["company_name"] = company_name
+        if linkedin_url:
+            contact["linkedin_url"] = linkedin_url
+
+        payload = {
+            "name": f"{first_name} {last_name}".strip() or "enrichment",
+            "datas": [contact],
+        }
+        resp = self.session.post(
+            f"{FULLENRICH_BASE}/contact/enrich/bulk?silentFail=true",
+            json=payload, timeout=REQUEST_TIMEOUT)
+        self._check(resp, "FullEnrich bulk enrich")
+        enrichment_id = resp.json().get("enrichment_id")
+        if not enrichment_id:
+            return {}
+
+        # Poll for results
+        import time as _time
+        deadline = _time.time() + poll_timeout
+        while _time.time() < deadline:
+            _time.sleep(5)
+            poll = self.session.get(
+                f"{FULLENRICH_BASE}/contact/enrich/bulk/{enrichment_id}",
+                timeout=REQUEST_TIMEOUT)
+            # 400 while still in progress — keep waiting
+            if poll.status_code == 400:
+                continue
+            self._check(poll, "FullEnrich poll results")
+            data = poll.json()
+            status = data.get("status", "")
+            if status == "FINISHED":
+                return self._parse_result(data)
+            if status in ("CANCELED", "CREDITS_INSUFFICIENT", "RATE_LIMIT",
+                          "UNKNOWN"):
+                if status == "CREDITS_INSUFFICIENT":
+                    raise EnrichmentCreditError(
+                        "FullEnrich: out of credits during enrichment.")
+                return {"_status": status}
+            # CREATED / IN_PROGRESS — keep polling
+        return {"_status": "TIMEOUT"}
+
+    def _parse_result(self, data: Dict) -> Dict:
+        """Extract work/personal emails and phones from FINISHED response."""
+        out: Dict[str, Any] = {"work_email": "", "work_email_status": "",
+                               "personal_email": "", "phones": []}
+        datas = data.get("datas") or data.get("data") or []
+        if not datas:
+            return out
+        record = datas[0]
+        contact_info = record.get("contact_info") or record.get("contact") or {}
+
+        # Work emails — prefer most probable, fall back to list
+        mp = contact_info.get("most_probable_work_email") or {}
+        if isinstance(mp, dict) and mp.get("email"):
+            out["work_email"] = mp["email"]
+            out["work_email_status"] = mp.get("status", "")
+        else:
+            work_emails = contact_info.get("work_emails") or []
+            if work_emails:
+                first = work_emails[0]
+                if isinstance(first, dict):
+                    out["work_email"] = first.get("email", "")
+                    out["work_email_status"] = first.get("status", "")
+                else:
+                    out["work_email"] = str(first)
+
+        # Personal emails
+        mp_pers = contact_info.get("most_probable_personal_email") or {}
+        if isinstance(mp_pers, dict) and mp_pers.get("email"):
+            out["personal_email"] = mp_pers["email"]
+        else:
+            pers_emails = contact_info.get("personal_emails") or []
+            if pers_emails:
+                first = pers_emails[0]
+                out["personal_email"] = (first.get("email", "")
+                                         if isinstance(first, dict)
+                                         else str(first))
+
+        # Phones
+        mp_phone = contact_info.get("most_probable_phone") or {}
+        if isinstance(mp_phone, dict) and mp_phone.get("number"):
+            out["phones"] = [mp_phone["number"]]
+        else:
+            phones = contact_info.get("phones") or []
+            out["phones"] = [
+                p.get("number", "") if isinstance(p, dict) else str(p)
+                for p in phones if p
+            ]
+        return out
+
+
 def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[str]:
-    """Best-effort: fetch the company homepage and look for an email address
-    containing the candidate's first or last name. Returns [] on any failure."""
+    """Best-effort: fetch the company homepage AND common team/contact pages
+    (where companies often list employee emails) and look for an email
+    address containing the candidate's first or last name.
+    Returns [] on any failure."""
     domain = (domain or "").strip().lower()
     if not domain or "." not in domain:
         return []
@@ -693,26 +861,34 @@ def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[
     last = (last_name or "").lower()
     if not (first or last):
         return []
-    url = domain if domain.startswith("http") else f"https://{domain}"
-    try:
-        resp = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; CandidateEnrichmentAgent/1.0)"},
-        )
-        if resp.status_code != 200 or not resp.text:
-            return []
-        found = []
-        for m in set(EMAIL_RE.findall(resp.text)):
-            ml = m.lower()
-            if (first and first in ml) or (last and last in ml):
-                # skip obvious generic addresses
-                local = ml.split("@")[0]
-                if local not in {"info", "contact", "support", "sales", "hello", "admin"}:
-                    found.append(m)
-        return sorted(set(found))
-    except Exception:
-        return []
+    base = domain if domain.startswith("http") else f"https://{domain}"
+    # Homepage + pages where employee emails are commonly listed
+    pages = ["", "/contact", "/contact-us", "/about", "/about-us",
+             "/team", "/our-team", "/staff", "/people", "/leadership",
+             "/management", "/company", "/our-people"]
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; CandidateEnrichmentAgent/1.0)"}
+    found = []
+    for page in pages:
+        try:
+            resp = requests.get(base + page, timeout=REQUEST_TIMEOUT,
+                                headers=headers)
+            if resp.status_code != 200 or not resp.text:
+                continue
+            for m in set(EMAIL_RE.findall(resp.text)):
+                ml = m.lower()
+                if (first and first in ml) or (last and last in ml):
+                    # skip obvious generic addresses
+                    local = ml.split("@")[0]
+                    if local not in {"info", "contact", "support", "sales",
+                                     "hello", "admin", "careers", "jobs",
+                                     "press", "media", "hr"}:
+                        if m not in found:
+                            found.append(m)
+            if found:
+                break  # stop once we find name-matching emails
+        except Exception:
+            continue
+    return sorted(set(found))
 
 
 def clean_domain(value: str) -> str:
@@ -731,13 +907,19 @@ def enrich_candidate(
     contactout_key: Optional[str] = None,
     hunter_key: Optional[str] = None,
     lusha_key: Optional[str] = None,
+    fullenrich_key: Optional[str] = None,
     polite_delay: float = 0.4,
     _domain_cache: Optional[Dict[str, str]] = None,
+    sheet_type: str = "maximum",
 ) -> Dict:
     """Enrich one candidate. Returns a result dict with explicit sources.
 
     candidate keys: first_name, last_name, company, title, linkedin_url,
                     company_domain (optional)
+    sheet_type: "professional" (work email required — Hunter first, all
+                fallbacks), "personal" (personal contacts first — skips
+                Hunter work-email finder to save credits, work email is
+                bonus), "maximum" (everything, default).
     """
     first = (candidate.get("first_name") or "").strip()
     last = (candidate.get("last_name") or "").strip()
@@ -858,7 +1040,10 @@ def enrich_candidate(
     # --- 3b) Hunter.io Email Finder + Verifier (work emails only).
     # Runs only if the tools above found no work email yet, to save credits.
     # Free plan: 25 searches + 50 verifications/month.
-    if hunter_key and not result["work_email"] and first and last:
+    # Skipped for "personal" sheets (work email is bonus there, not required)
+    # to save Hunter credits for when they matter.
+    if hunter_key and not result["work_email"] and first and last \
+            and sheet_type != "personal":
         hdomain = domain
         if not hdomain:
             result["notes"].append(
@@ -910,6 +1095,55 @@ def enrich_candidate(
                 raise
             except Exception as exc:  # per-candidate failure never kills the run
                 result["notes"].append(f"Hunter.io lookup failed: {exc}")
+
+    # --- 3b2) FullEnrich waterfall (work emails Hunter missed + personal emails).
+    # Runs after Hunter: picks up remaining work emails and personal emails.
+    # Free plan: 50 credits, no card. Costs: work email 1, personal email 3,
+    # phone 10. No result = 0 credits. Only asks for what's still missing.
+    need_fe_work = not result["work_email"]
+    need_fe_pers = not result["personal_email"]
+    if fullenrich_key and (need_fe_work or need_fe_pers) and first and last:
+        try:
+            fe = FullEnrichClient(fullenrich_key)
+            fe_domain = domain or ""
+            fe_result = fe.enrich_one(
+                first, last,
+                domain=fe_domain,
+                company_name=company,
+                linkedin_url=linkedin_url,
+                want_work_email=need_fe_work,
+                want_personal_email=need_fe_pers,
+                want_phone=False,  # phones are expensive (10 credits); skip
+            )
+            if fe_result.get("_status"):
+                status = fe_result["_status"]
+                if status not in ("TIMEOUT",):
+                    result["notes"].append(
+                        f"FullEnrich: no result ({status}).")
+            else:
+                fe_work = fe_result.get("work_email", "")
+                fe_status = fe_result.get("work_email_status", "")
+                if need_fe_work and fe_work:
+                    result["work_email"] = fe_work
+                    src = "FullEnrich"
+                    if fe_status:
+                        src += f" [{fe_status}]"
+                    result["work_email_source"] = src
+                    result["notes"].append(
+                        f"FullEnrich found work email: {fe_work} "
+                        f"(status: {fe_status or 'unknown'}).")
+                fe_pers = fe_result.get("personal_email", "")
+                if need_fe_pers and fe_pers:
+                    result["personal_email"] = fe_pers
+                    result["notes"].append(
+                        f"FullEnrich found personal email: {fe_pers}.")
+                if not fe_work and not fe_pers:
+                    result["notes"].append(
+                        "FullEnrich: no work or personal email found.")
+        except (EnrichmentAuthError, EnrichmentCreditError):
+            raise
+        except Exception as exc:  # per-candidate failure never kills the run
+            result["notes"].append(f"FullEnrich lookup failed: {exc}")
 
     # --- 3c) Lusha Search & Enrich v3 (work emails + phone numbers).
     # Free plan is ~40 credits/month; v3 charges one for the search plus one
@@ -1019,7 +1253,7 @@ def enrich_candidate(
                         f"mail servers (domain may be wrong).")
                 directory_email = ""
                 directory_found = False
-                if hunter_key and mx_ok:
+                if hunter_key and mx_ok and sheet_type != "personal":
                     # Directory step: Hunter's domain directory lists real
                     # emails at the company. If the candidate's own email is
                     # in there, that's a FOUND email (green). Otherwise learn
@@ -1070,7 +1304,9 @@ def enrich_candidate(
     # --- 4b) Verify any UNVERIFIED work email with Hunter before it ships.
     # If Hunter's verifier says "invalid", drop it — a wrong email is worse
     # than a blank cell. Costs 1 verification credit per email.
-    if result["work_email"] and hunter_key and \
+    # Skipped for "personal" sheets to save verification credits (work email
+    # is bonus there, not required).
+    if result["work_email"] and hunter_key and sheet_type != "personal" and \
             "UNVERIFIED" in (result.get("work_email_source") or ""):
         try:
             v = HunterClient(hunter_key).email_verifier(result["work_email"])
@@ -1094,10 +1330,15 @@ def enrich_candidate(
 
 
 def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
-                hunter_key=None, lusha_key=None):
-    """Generator yielding (index, candidate, result) for progress display."""
+                hunter_key=None, lusha_key=None, fullenrich_key=None,
+                sheet_type: str = "maximum"):
+    """Generator yielding (index, candidate, result) for progress display.
+    sheet_type: "professional" (work emails required), "personal" (personal
+    contacts first, work email bonus), or "maximum" (everything)."""
     _domain_cache: Dict[str, str] = {}
     for i, cand in enumerate(candidates):
         yield i, cand, enrich_candidate(cand, salesql_key, contactout_key,
                                         hunter_key, lusha_key,
-                                        _domain_cache=_domain_cache)
+                                        fullenrich_key=fullenrich_key,
+                                        _domain_cache=_domain_cache,
+                                        sheet_type=sheet_type)

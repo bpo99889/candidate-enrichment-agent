@@ -216,6 +216,9 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     # Separate column for unverified work emails — always added so the
     # user can see where unverified emails land (stays empty if none).
     targets["possible_work_email"] = ([], "Possible Work Email")
+    # Notes column: explains what happened for each candidate (domain found,
+    # fallbacks tried, why emails were dropped). Always added.
+    targets["notes"] = ([], "Enrichment Notes")
     colmap = {}
     for field, (aliases, new_name) in targets.items():
         idx = next((norm[a] for a in aliases if a in norm), None)
@@ -243,6 +246,7 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
             "personal_email": res.get("personal_email") or "",
             "personal_phone": res.get("personal_phone") or "",
             "work_phone": res.get("work_phone") or "",
+            "notes": res.get("notes") or "",
         }
         for field, cidx in colmap.items():
             if not vals[field]:
@@ -271,6 +275,7 @@ def download_block(key: str):
             "Personal email": r.get("personal_email", ""),
             "Work email": r.get("work_email", ""),
             "Work email source": r.get("work_email_source", ""),
+            "What happened": r.get("notes", ""),
         }
         for c, r in enriched_rows
     ])
@@ -410,10 +415,34 @@ with tab_api:
                 except Exception as e:
                     st.error(f"Key check failed: {e}")
 
+    c5, c6 = st.columns(2)
+    with c5:
+        fullenrich_key = st.text_input(
+            "FullEnrich API key", type="password", key="api_fullenrich",
+            help="app.fullenrich.com → Settings → API. Free plan: 50 credits, no card. Waterfall enrichment — finds work emails (1 credit) and personal emails (3 credits) that Hunter misses.",
+        ) or None
+        if st.button("Test FullEnrich key (free)", key="api_test_fullenrich"):
+            if not fullenrich_key:
+                st.error("Paste your FullEnrich API key first.")
+            else:
+                try:
+                    from enrich import FullEnrichClient
+                    fe = FullEnrichClient(fullenrich_key)
+                    fe.verify()
+                    bal = fe.credits()
+                    st.success(f"Key works. Credit balance: {bal.get('balance', '?')}")
+                except EnrichmentAuthError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Key check failed: {e}")
+    with c6:
+        st.empty()  # spacer
+
     api_candidates = upload_block("api")
     can_run = bool(api_candidates) and (salesql_key or contactout_key or hunter_key
-                                        or lusha_key)
-    if api_candidates and not (salesql_key or contactout_key or hunter_key or lusha_key):
+                                        or lusha_key or fullenrich_key)
+    if api_candidates and not (salesql_key or contactout_key or hunter_key
+                               or lusha_key or fullenrich_key):
         st.warning("Paste at least one API key above to run.")
     if hunter_key and api_candidates:
         st.caption(f"Hunter.io free plan: 25 searches/month. "
@@ -425,9 +454,28 @@ with tab_api:
                    f"~5 per phone. This run uses 1 Lusha call per candidate "
                    f"that still needs an email or phone, revealing only "
                    f"what's missing (~1-7 credits each).")
+    if fullenrich_key and api_candidates:
+        st.caption(f"FullEnrich free plan: 50 credits — 1 per work email, "
+                   f"3 per personal email. Runs after Hunter, only for "
+                   f"candidates still missing emails.")
+    sheet_type = st.radio(
+        "What type of sheet is this?",
+        ["Professional (work emails required)",
+         "Personal (personal emails/phones first)",
+         "Maximum (everything)"],
+        key="api_sheet_type",
+        help="Professional: goes all-out on work emails (Hunter + all fallbacks). "
+             "Personal: prioritizes personal contacts, work email is bonus. "
+             "Maximum: finds everything.")
+    # Map to short codes used by enrich.py
+    sheet_code = {"Professional (work emails required)": "professional",
+                  "Personal (personal emails/phones first)": "personal",
+                  "Maximum (everything)": "maximum"}[sheet_type]
     run_enrichment("api", api_candidates,
                    lambda: enrich_list(api_candidates, salesql_key, contactout_key,
-                                       hunter_key, lusha_key),
+                                       hunter_key, lusha_key,
+                                       fullenrich_key=fullenrich_key,
+                                       sheet_type=sheet_code),
                    can_run=can_run)
     download_block("api")
 
