@@ -456,8 +456,8 @@ with tab_api:
                    f"what's missing (~1-7 credits each).")
     if fullenrich_key and api_candidates:
         st.caption(f"FullEnrich free plan: 50 credits — 1 per work email, "
-                   f"3 per personal email. Runs after Hunter, only for "
-                   f"candidates still missing emails.")
+                   f"3 per personal email, 10 per phone. Runs after Hunter, "
+                   f"only for candidates still missing emails/phones.")
     sheet_type = st.radio(
         "What type of sheet is this?",
         ["Professional (work emails required)",

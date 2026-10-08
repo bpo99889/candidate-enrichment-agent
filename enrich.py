@@ -1096,13 +1096,16 @@ def enrich_candidate(
             except Exception as exc:  # per-candidate failure never kills the run
                 result["notes"].append(f"Hunter.io lookup failed: {exc}")
 
-    # --- 3b2) FullEnrich waterfall (work emails Hunter missed + personal emails).
-    # Runs after Hunter: picks up remaining work emails and personal emails.
-    # Free plan: 50 credits, no card. Costs: work email 1, personal email 3,
-    # phone 10. No result = 0 credits. Only asks for what's still missing.
+    # --- 3b2) FullEnrich waterfall (work emails Hunter missed + personal emails + phones).
+    # Runs after Hunter: picks up remaining work emails, personal emails,
+    # and phone numbers. Free plan: 50 credits, no card. Costs: work email 1,
+    # personal email 3, phone 10. No result = 0 credits.
+    # Only asks for what's still missing.
     need_fe_work = not result["work_email"]
     need_fe_pers = not result["personal_email"]
-    if fullenrich_key and (need_fe_work or need_fe_pers) and first and last:
+    need_fe_phone = not result["personal_phone"] and not result["work_phone"]
+    if fullenrich_key and (need_fe_work or need_fe_pers or need_fe_phone) \
+            and first and last:
         try:
             fe = FullEnrichClient(fullenrich_key)
             fe_domain = domain or ""
@@ -1113,7 +1116,7 @@ def enrich_candidate(
                 linkedin_url=linkedin_url,
                 want_work_email=need_fe_work,
                 want_personal_email=need_fe_pers,
-                want_phone=False,  # phones are expensive (10 credits); skip
+                want_phone=need_fe_phone,
             )
             if fe_result.get("_status"):
                 status = fe_result["_status"]
@@ -1137,9 +1140,15 @@ def enrich_candidate(
                     result["personal_email"] = fe_pers
                     result["notes"].append(
                         f"FullEnrich found personal email: {fe_pers}.")
-                if not fe_work and not fe_pers:
+                fe_phones = fe_result.get("phones") or []
+                if need_fe_phone and fe_phones:
+                    # Route to personal/mobile (same as ContactOut rule)
+                    result["personal_phone"] = "; ".join(fe_phones)
                     result["notes"].append(
-                        "FullEnrich: no work or personal email found.")
+                        f"FullEnrich found phone(s): {'; '.join(fe_phones)}.")
+                if not fe_work and not fe_pers and not fe_phones:
+                    result["notes"].append(
+                        "FullEnrich: no work email, personal email, or phone found.")
         except (EnrichmentAuthError, EnrichmentCreditError):
             raise
         except Exception as exc:  # per-candidate failure never kills the run
