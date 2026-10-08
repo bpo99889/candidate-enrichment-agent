@@ -195,12 +195,14 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
                                     "lusha", "fullenrich"))
 
     def _reoon_fill(status: str):
-        """Red for invalid, green for everything else."""
+        """Red for invalid, green for other non-safe statuses, none for safe."""
         s = (status or "").lower()
         if not s:
             return None
         if s == "invalid":
             return RED_FILL
+        if s == "safe":
+            return None
         return GREEN_FILL
 
     bio = io.BytesIO(file_bytes)
