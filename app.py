@@ -646,6 +646,8 @@ with st.expander("⚙️ How BPO WIZARD enriches each candidate (in order)"):
         "4. **FullEnrich** — work emails Hunter missed + personal emails + phone numbers (only what's still missing)\n"
         "5. **Lusha** — last resort for anything still empty\n"
         "6. **Free fallbacks** — company website scan, Hunter directory, pattern guess (all marked UNVERIFIED in Possible Work Email)\n"
+        "7. **Reoon email verification** — after enrichment, checks every work email for bounces (Power mode). "
+        "Invalid emails are highlighted **red**, other non-safe statuses **green**, safe emails stay plain.\n"
         "\n"
         "Each step only runs if the previous ones left gaps, so you don't waste credits."
     )
