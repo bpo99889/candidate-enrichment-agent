@@ -684,8 +684,10 @@ def guess_work_emails(first_name: str, last_name: str, domain: str) -> List[str]
 
 
 def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[str]:
-    """Best-effort: fetch the company homepage and look for an email address
-    containing the candidate's first or last name. Returns [] on any failure."""
+    """Best-effort: fetch the company homepage AND common team/contact pages
+    (where companies often list employee emails) and look for an email
+    address containing the candidate's first or last name.
+    Returns [] on any failure."""
     domain = (domain or "").strip().lower()
     if not domain or "." not in domain:
         return []
@@ -693,26 +695,34 @@ def find_email_on_website(domain: str, first_name: str, last_name: str) -> List[
     last = (last_name or "").lower()
     if not (first or last):
         return []
-    url = domain if domain.startswith("http") else f"https://{domain}"
-    try:
-        resp = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; CandidateEnrichmentAgent/1.0)"},
-        )
-        if resp.status_code != 200 or not resp.text:
-            return []
-        found = []
-        for m in set(EMAIL_RE.findall(resp.text)):
-            ml = m.lower()
-            if (first and first in ml) or (last and last in ml):
-                # skip obvious generic addresses
-                local = ml.split("@")[0]
-                if local not in {"info", "contact", "support", "sales", "hello", "admin"}:
-                    found.append(m)
-        return sorted(set(found))
-    except Exception:
-        return []
+    base = domain if domain.startswith("http") else f"https://{domain}"
+    # Homepage + pages where employee emails are commonly listed
+    pages = ["", "/contact", "/contact-us", "/about", "/about-us",
+             "/team", "/our-team", "/staff", "/people", "/leadership",
+             "/management", "/company", "/our-people"]
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; CandidateEnrichmentAgent/1.0)"}
+    found = []
+    for page in pages:
+        try:
+            resp = requests.get(base + page, timeout=REQUEST_TIMEOUT,
+                                headers=headers)
+            if resp.status_code != 200 or not resp.text:
+                continue
+            for m in set(EMAIL_RE.findall(resp.text)):
+                ml = m.lower()
+                if (first and first in ml) or (last and last in ml):
+                    # skip obvious generic addresses
+                    local = ml.split("@")[0]
+                    if local not in {"info", "contact", "support", "sales",
+                                     "hello", "admin", "careers", "jobs",
+                                     "press", "media", "hr"}:
+                        if m not in found:
+                            found.append(m)
+            if found:
+                break  # stop once we find name-matching emails
+        except Exception:
+            continue
+    return sorted(set(found))
 
 
 def clean_domain(value: str) -> str:
@@ -733,11 +743,16 @@ def enrich_candidate(
     lusha_key: Optional[str] = None,
     polite_delay: float = 0.4,
     _domain_cache: Optional[Dict[str, str]] = None,
+    sheet_type: str = "maximum",
 ) -> Dict:
     """Enrich one candidate. Returns a result dict with explicit sources.
 
     candidate keys: first_name, last_name, company, title, linkedin_url,
                     company_domain (optional)
+    sheet_type: "professional" (work email required — Hunter first, all
+                fallbacks), "personal" (personal contacts first — skips
+                Hunter work-email finder to save credits, work email is
+                bonus), "maximum" (everything, default).
     """
     first = (candidate.get("first_name") or "").strip()
     last = (candidate.get("last_name") or "").strip()
@@ -858,7 +873,10 @@ def enrich_candidate(
     # --- 3b) Hunter.io Email Finder + Verifier (work emails only).
     # Runs only if the tools above found no work email yet, to save credits.
     # Free plan: 25 searches + 50 verifications/month.
-    if hunter_key and not result["work_email"] and first and last:
+    # Skipped for "personal" sheets (work email is bonus there, not required)
+    # to save Hunter credits for when they matter.
+    if hunter_key and not result["work_email"] and first and last \
+            and sheet_type != "personal":
         hdomain = domain
         if not hdomain:
             result["notes"].append(
@@ -1019,7 +1037,7 @@ def enrich_candidate(
                         f"mail servers (domain may be wrong).")
                 directory_email = ""
                 directory_found = False
-                if hunter_key and mx_ok:
+                if hunter_key and mx_ok and sheet_type != "personal":
                     # Directory step: Hunter's domain directory lists real
                     # emails at the company. If the candidate's own email is
                     # in there, that's a FOUND email (green). Otherwise learn
@@ -1070,7 +1088,9 @@ def enrich_candidate(
     # --- 4b) Verify any UNVERIFIED work email with Hunter before it ships.
     # If Hunter's verifier says "invalid", drop it — a wrong email is worse
     # than a blank cell. Costs 1 verification credit per email.
-    if result["work_email"] and hunter_key and \
+    # Skipped for "personal" sheets to save verification credits (work email
+    # is bonus there, not required).
+    if result["work_email"] and hunter_key and sheet_type != "personal" and \
             "UNVERIFIED" in (result.get("work_email_source") or ""):
         try:
             v = HunterClient(hunter_key).email_verifier(result["work_email"])
@@ -1094,10 +1114,13 @@ def enrich_candidate(
 
 
 def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
-                hunter_key=None, lusha_key=None):
-    """Generator yielding (index, candidate, result) for progress display."""
+                hunter_key=None, lusha_key=None, sheet_type: str = "maximum"):
+    """Generator yielding (index, candidate, result) for progress display.
+    sheet_type: "professional" (work emails required), "personal" (personal
+    contacts first, work email bonus), or "maximum" (everything)."""
     _domain_cache: Dict[str, str] = {}
     for i, cand in enumerate(candidates):
         yield i, cand, enrich_candidate(cand, salesql_key, contactout_key,
                                         hunter_key, lusha_key,
-                                        _domain_cache=_domain_cache)
+                                        _domain_cache=_domain_cache,
+                                        sheet_type=sheet_type)
