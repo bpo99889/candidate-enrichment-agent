@@ -216,9 +216,6 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
     # Separate column for unverified work emails — always added so the
     # user can see where unverified emails land (stays empty if none).
     targets["possible_work_email"] = ([], "Possible Work Email")
-    # Notes column: explains what happened for each candidate (domain found,
-    # fallbacks tried, why emails were dropped). Always added.
-    targets["notes"] = ([], "Enrichment Notes")
     colmap = {}
     for field, (aliases, new_name) in targets.items():
         idx = next((norm[a] for a in aliases if a in norm), None)
@@ -246,7 +243,6 @@ def fill_original_sheet(file_bytes, filename, enriched_rows):
             "personal_email": res.get("personal_email") or "",
             "personal_phone": res.get("personal_phone") or "",
             "work_phone": res.get("work_phone") or "",
-            "notes": res.get("notes") or "",
         }
         for field, cidx in colmap.items():
             if not vals[field]:
@@ -275,7 +271,6 @@ def download_block(key: str):
             "Personal email": r.get("personal_email", ""),
             "Work email": r.get("work_email", ""),
             "Work email source": r.get("work_email_source", ""),
-            "What happened": r.get("notes", ""),
         }
         for c, r in enriched_rows
     ])
@@ -430,23 +425,9 @@ with tab_api:
                    f"~5 per phone. This run uses 1 Lusha call per candidate "
                    f"that still needs an email or phone, revealing only "
                    f"what's missing (~1-7 credits each).")
-    sheet_type = st.radio(
-        "What type of sheet is this?",
-        ["Professional (work emails required)",
-         "Personal (personal emails/phones first)",
-         "Maximum (everything)"],
-        key="api_sheet_type",
-        help="Professional: goes all-out on work emails (Hunter + all fallbacks). "
-             "Personal: prioritizes personal contacts, work email is bonus. "
-             "Maximum: finds everything.")
-    # Map to short codes used by enrich.py
-    sheet_code = {"Professional (work emails required)": "professional",
-                  "Personal (personal emails/phones first)": "personal",
-                  "Maximum (everything)": "maximum"}[sheet_type]
     run_enrichment("api", api_candidates,
                    lambda: enrich_list(api_candidates, salesql_key, contactout_key,
-                                       hunter_key, lusha_key,
-                                       sheet_type=sheet_code),
+                                       hunter_key, lusha_key),
                    can_run=can_run)
     download_block("api")
 
