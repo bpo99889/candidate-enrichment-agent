@@ -532,30 +532,56 @@ with tab_api:
     if enriched and reoon_key_ss:
         # Count how many have work emails to verify
         to_verify = sum(1 for _c, _r in enriched if (_r.get("work_email") or "").strip())
-        if st.button(f"Check for bounces — {to_verify} emails (Reoon Power mode)",
-                     key="api_reoon_check"):
+        if to_verify == 0:
+            st.info("Bounce check: none of the enriched candidates have a work email, "
+                    "so there is nothing for Reoon to verify.")
+        elif st.button(f"Check for bounces — {to_verify} emails (Reoon Power mode)",
+                       key="api_reoon_check"):
             from enrich import verify_emails_with_reoon
+            stage = st.empty()
             progress = st.progress(0, text="Starting Reoon verification…")
+            # Stage indicator BEFORE the first API call: if this message never
+            # changes, the click reached the handler but the Reoon call hangs.
+            # If no message appears at all, the click never reached the handler.
+            stage.info("Calling Reoon for email 1/%d…" % to_verify)
             try:
                 done = 0
+                errors = 0
+                first_error = ""
                 for idx, email, status in verify_emails_with_reoon(
                         enriched, reoon_key_ss, mode="power"):
                     done += 1
+                    if str(status).startswith("error:"):
+                        errors += 1
+                        if not first_error:
+                            first_error = str(status)
+                    # Persist after every email so partial results survive
+                    # even if the run is interrupted.
+                    st.session_state["api_enriched"] = enriched
+                    if done < to_verify:
+                        stage.info("Calling Reoon for email %d/%d…" % (done + 1, to_verify))
                     progress.progress(done / max(to_verify, 1),
                                      text=f"Verified {done}/{to_verify}: {email} → {status}")
-                st.session_state["api_enriched"] = enriched
                 progress.empty()
+                stage.empty()
+                if errors:
+                    st.warning(
+                        f"Bounce check finished, but {errors} of {done} Reoon calls "
+                        f"failed. First error: {first_error}")
                 st.success(f"Bounce check complete — {done} emails verified. "
                            "Download your sheet below: invalid=red, others=green, safe=plain.")
                 st.rerun()
             except EnrichmentAuthError as e:
                 progress.empty()
+                stage.empty()
                 st.error(str(e))
             except EnrichmentCreditError as e:
                 progress.empty()
+                stage.empty()
                 st.error(str(e))
             except Exception as e:
                 progress.empty()
+                stage.empty()
                 st.error(f"Bounce check failed: {e}")
     elif enriched and not reoon_key_ss:
         st.caption("Paste a Reoon API key above to check for bounces.")
