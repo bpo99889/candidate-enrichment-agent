@@ -464,7 +464,7 @@ with tab_api:
     with c6:
         reoon_key = st.text_input(
             "Reoon API key", type="password", key="api_reoon",
-            help="emailverifier.reoon.com → dashboard. Free: ~20/day, 600/month, no card. Verifies emails for bounces (Power mode).",
+            help="emailverifier.reoon.com → dashboard. Free: ~20/day, 600/month, no card. Verifies emails for bounces (Quick mode).",
         ) or None
         if st.button("Test Reoon key (free)", key="api_test_reoon"):
             if not reoon_key:
@@ -535,7 +535,7 @@ with tab_api:
         if to_verify == 0:
             st.info("Bounce check: none of the enriched candidates have a work email, "
                     "so there is nothing for Reoon to verify.")
-        elif st.button(f"Check for bounces — {to_verify} emails (Reoon Power mode)",
+        elif st.button(f"Check for bounces — {to_verify} emails (Reoon Quick mode)",
                        key="api_reoon_check"):
             from enrich import verify_emails_with_reoon
             stage = st.empty()
@@ -549,7 +549,7 @@ with tab_api:
                 errors = 0
                 first_error = ""
                 for idx, email, status in verify_emails_with_reoon(
-                        enriched, reoon_key_ss, mode="power"):
+                        enriched, reoon_key_ss, mode="quick"):
                     done += 1
                     if str(status).startswith("error:"):
                         errors += 1
@@ -690,7 +690,7 @@ with st.expander("⚙️ How BPO WIZARD enriches each candidate (in order)"):
         "4. **FullEnrich** — work emails Hunter missed + personal emails + phone numbers (only what's still missing)\n"
         "5. **Lusha** — last resort for anything still empty\n"
         "6. **Free fallbacks** — company website scan, Hunter directory, pattern guess (all marked UNVERIFIED in Possible Work Email)\n"
-        "7. **Reoon email verification** — after enrichment, checks every work email for bounces (Power mode). "
+        "7. **Reoon email verification** — after enrichment, checks every work email for bounces (Quick mode). "
         "Invalid emails are highlighted **red**, other non-safe statuses **green**, safe emails stay plain.\n"
         "\n"
         "Each step only runs if the previous ones left gaps, so you don't waste credits."

@@ -888,16 +888,17 @@ class ReoonClient:
         self._check(resp, "Reoon account info")
         return resp.json()
 
-    def verify(self, email: str, mode: str = "power") -> Dict:
+    def verify(self, email: str, mode: str = "quick") -> Dict:
         """GET /verify — verify a single email.
 
-        mode: "quick" or "power" (default power for deepest check).
+        mode: "quick" (0.5s, syntax/MX/disposable) or "power" (deep SMTP,
+        can take 60+ seconds — may timeout on Streamlit Cloud).
         Returns the raw JSON: status, overall_score, is_safe_to_send, etc.
         """
         resp = self.session.get(
             f"{REOON_BASE}/verify",
             params={"email": email, "key": self.api_key, "mode": mode},
-            timeout=60)  # power mode can take a few seconds
+            timeout=30)
         self._check(resp, "Reoon verify")
         return resp.json()
 
@@ -1415,7 +1416,7 @@ def enrich_list(candidates: List[Dict], salesql_key=None, contactout_key=None,
 
 
 def verify_emails_with_reoon(enriched_rows, reoon_key: str,
-                             mode: str = "power"):
+                             mode: str = "quick"):
     """Generator yielding (index, email, reoon_status) for bounce checking.
 
     Verifies each result's work email via Reoon. Yields (index, email, status)
@@ -1424,6 +1425,7 @@ def verify_emails_with_reoon(enriched_rows, reoon_key: str,
     Only verifies rows that have a work email.
 
     enriched_rows: list of (candidate_dict, result_dict) tuples.
+    mode: "quick" (default, 0.5s) or "power" (deep, can timeout on cloud).
     """
     client = ReoonClient(reoon_key)
     for i, (cand, res) in enumerate(enriched_rows):
